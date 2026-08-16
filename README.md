@@ -1,5 +1,8 @@
 # @gmod/range-cache-filehandle
 
+[![NPM version](https://img.shields.io/npm/v/@gmod/range-cache-filehandle.svg?style=flat-square)](https://npmjs.org/package/@gmod/range-cache-filehandle)
+![Build Status](https://img.shields.io/github/actions/workflow/status/GMOD/range-cache-filehandle/publish.yml?branch=main)
+
 A `GenericFilehandle` that caches byte ranges in chunks and coalesces adjacent
 reads into one request.
 
