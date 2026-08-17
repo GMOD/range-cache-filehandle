@@ -12,7 +12,7 @@ and is the copy to update if a measurement changes.
 | `CHUNK_SIZE`            | 256 KiB       | the grid a read snaps to            |
 | `MAX_CACHE_ENTRIES`     | 1000 (256 MB) | retained bytes, per module instance |
 | `CACHE_IDLE_TIMEOUT_MS` | 15 min        | how long an unread chunk survives   |
-| `MAX_CONCURRENT`        | 20            | requests in flight, all files       |
+| `MAX_CONCURRENT`        | 20            | requests in flight, **per file**    |
 | `RESPONSE_TIMEOUT_MS`   | 30 s          | wait for a response to _begin_      |
 
 Every one of them was chosen against one workload: a genome browser panning a

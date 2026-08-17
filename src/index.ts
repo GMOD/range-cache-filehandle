@@ -1,6 +1,6 @@
 export { CachedFilehandle } from './CachedFilehandle.ts'
 export { RemoteFileWithRangeCache } from './RemoteFileWithRangeCache.ts'
-export { clearCache, sweepIdleCache } from './chunkCache.ts'
+export { clearCache, clearCacheFor, sweepIdleCache } from './chunkCache.ts'
 export {
   CACHE_IDLE_TIMEOUT_MS,
   CHUNK_SIZE,

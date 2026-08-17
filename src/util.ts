@@ -20,32 +20,26 @@ export function unrefIfPossible(timer: unknown) {
 }
 
 /**
- * One signal that aborts when either of two do.
+ * Parse a `Content-Range: bytes 0-255/12345` response header.
  *
- * `AbortSignal.any` where it exists — Chrome 116, Firefox 124, Safari 17.4. The
- * manual composition stays behind a feature test rather than being deleted
- * because this package is published for consumers who set their own targets,
- * where a missing static would be a TypeError on every range request.
+ * `total` is undefined for the `bytes 0-255/*` form, in which the server
+ * declines to say how long the file is, and `start`/`end` are undefined for the
+ * `bytes * /12345` form a 416 carries. Anything unparseable yields undefined,
+ * and the caller treats the response as unvalidatable rather than as wrong.
  */
-export function anySignal(a: AbortSignal, b: AbortSignal) {
-  if (typeof AbortSignal.any === 'function') {
-    return AbortSignal.any([a, b])
+export function parseContentRange(header: string | null) {
+  const match = header
+    ? /^bytes (?:(\d+)-(\d+)|\*)\/(?:(\d+)|\*)$/.exec(header.trim())
+    : null
+  if (!match) {
+    return undefined
   }
-  const composed = new AbortController()
-  for (const source of [a, b]) {
-    if (source.aborted) {
-      composed.abort(source.reason)
-    } else {
-      source.addEventListener(
-        'abort',
-        () => {
-          composed.abort(source.reason)
-        },
-        { once: true },
-      )
-    }
+  const [, start, end, total] = match
+  return {
+    start: start === undefined ? undefined : Number.parseInt(start, 10),
+    end: end === undefined ? undefined : Number.parseInt(end, 10),
+    total: total === undefined ? undefined : Number.parseInt(total, 10),
   }
-  return composed.signal
 }
 
 /**
@@ -69,11 +63,32 @@ export function parseByteRange(range: string | null) {
  * `RemoteFile.read`'s NaN guard, which neither reader in this package reaches
  * any more: both enter the chunk cache below that method. A NaN length arrives
  * from a corrupt index and would otherwise become a `bytes=NaN-NaN` request.
+ *
+ * Widened past NaN because the chunk arithmetic downstream launders a bad
+ * offset into something that looks like a real request instead of failing.
+ * A negative position produces the header `bytes=-262144--1`, which is not a
+ * malformed request a server rejects but a *valid* one meaning something else
+ * — the leading `-` is the suffix-range form, so a server may answer 200 or
+ * serve the last 262144 bytes of the file, and this layer would cache those
+ * bytes at the wrong offsets. A fractional position is quieter still: it is
+ * floored during assembly, so the read silently returns the bytes next to the
+ * ones asked for. Both come from the same place a NaN does, an index that is
+ * corrupt or being parsed against the wrong file.
  */
 export function assertReadArgs(key: string, length: number, position: number) {
   if (Number.isNaN(length) || Number.isNaN(position)) {
     throw new TypeError(
       `read() of ${key} called with NaN length or position (length=${length}, position=${position}); the index the offset came from is probably corrupt or truncated`,
+    )
+  }
+  if (
+    !Number.isSafeInteger(length) ||
+    !Number.isSafeInteger(position) ||
+    length < 0 ||
+    position < 0
+  ) {
+    throw new TypeError(
+      `read() of ${key} needs a non-negative safe-integer length and position (length=${length}, position=${position}); the index the offset came from is probably corrupt or being read against the wrong file`,
     )
   }
 }

@@ -47,15 +47,31 @@ const file = new CachedFilehandle(new LocalFile(path), `file://${path}`)
 - Reference-counts each run's readers, so a shared request is cancelled only
   once all of them abort. A reader passing no signal pins it for everyone.
 - Holds 1000 chunks (256 MB) per worker, swept after 15 minutes idle, 20
-  requests at a time. `clearCache()` drops everything, `sweepIdleCache()`
-  reclaims early.
+  requests at a time **per file**. `clearCache()` drops everything,
+  `clearCacheFor(key)` drops one file, `sweepIdleCache()` reclaims early.
 - Clamps reads past EOF once a size is known, from `Content-Range`, a 416, or
   `stat()`.
+- Checks a `206` against what it claims to be, so a truncated body or a proxy
+  answering with the wrong range fails loudly instead of being cached as a file
+  that ends early.
 - Names a cause on failure: CORS, mixed content, a server ignoring the Range
   header, a connection that goes 30s without answering.
 
-Nothing is retried. [docs/dataflow.md](docs/dataflow.md) has the diagram and
-walks one read through all of it.
+Nothing is retried, and **nothing puts a clock on a transfer**. This layer
+coalesces a run of chunks into one request, so a large one is the normal case,
+and any duration limit would cut off a slow download rather than a broken one —
+`fetch` [has no timeout of its own](https://github.com/whatwg/fetch/issues/951)
+for the same reason. The way to stop a read is the `AbortSignal` you passed it,
+which is carried to the socket.
+
+Requests are capped per file rather than per process so that one unresponsive
+server cannot starve the others — the
+[per-endpoint semaphore](https://copdips.com/2023/01/python-aiohttp-rate-limit.html)
+shape, since a global limit "will unnecessarily restrict requests to other
+endpoints as well".
+
+[docs/dataflow.md](docs/dataflow.md) has the diagram and walks one read through
+all of it.
 
 ## Tuning
 
@@ -75,6 +91,23 @@ in the process. What each was measured against is in `src/constants.ts` and in
 - [docs/tuning.md](docs/tuning.md) — the five constants, what measured them, and
   what changes outside a browser
 - [docs/errors.md](docs/errors.md) — what each failure says and why
+
+## References
+
+- [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html) — HTTP semantics:
+  [Range](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.2) §14.2,
+  [Content-Range](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4)
+  §14.4, [206](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.7)
+  §15.3.7, [416](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5.17)
+  §15.5.17. Only single-part ranges are cached; a multi-range request is passed
+  straight through rather than partly honored.
+- [WHATWG DOM: dependent signals](https://dom.spec.whatwg.org/#abortsignal-dependent-signals)
+  — why `AbortSignal.any` retains nothing while a hand-composed listener must be
+  removed.
+- [whatwg/fetch#951](https://github.com/whatwg/fetch/issues/951) — why `fetch`
+  has no timeout, and why this package adds none over a transfer.
+- [Per-endpoint rate limiting](https://copdips.com/2023/01/python-aiohttp-rate-limit.html)
+  — the semaphore-per-endpoint shape `MAX_CONCURRENT` uses.
 
 ## The layer above
 

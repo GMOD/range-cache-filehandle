@@ -57,11 +57,11 @@ request this way.
 
 ## Fetching
 
-Each run goes through `limitConcurrency` — at most 20 requests in flight across
-every file, the rest queued — and then to the underlying source, which is the
-only part of this package that knows what the source is.
-`RemoteFileWithRangeCache` sets a range header and calls `fetch`;
-`CachedFilehandle` calls `read` on whatever it wraps.
+Each run goes through `limitConcurrency` — at most 20 requests in flight for any
+one file, the rest queued — and then to the underlying source, which is the only
+part of this package that knows what the source is. `RemoteFileWithRangeCache`
+sets a range header and calls `fetch`; `CachedFilehandle` calls `read` on
+whatever it wraps.
 
 The response is sliced into chunk-sized pieces with `slice`, not `subarray`. A
 view would keep the whole 6.5 MiB run buffer alive for as long as any one of its

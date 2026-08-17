@@ -47,7 +47,52 @@ export const CACHE_IDLE_TIMEOUT_MS = 15 * 60 * 1000
  */
 export const SWEEP_INTERVAL_MS = CACHE_IDLE_TIMEOUT_MS / 4
 
+/**
+ * Requests in flight at once **per file**, not per process.
+ *
+ * Scoped per key deliberately. Held globally, the pool was a place one file
+ * could take the whole process down: a server that answers the headers and then
+ * goes silent mid-body never settles, so its request never gives the slot back,
+ * and twenty such requests — the cap exactly — blocked every read of every
+ * other file indefinitely. Measured, and permanent, since nothing here times a
+ * transfer out and nothing should: this layer coalesces a contiguous run into
+ * one request, and a large one is the normal case rather than the pathological
+ * one.
+ *
+ * Per key, that same dead server stalls only the file it serves. The change is
+ * in the permissive direction — twenty files may now have twenty requests each,
+ * where before they shared twenty — which is the right way round, because the
+ * limit exists to be polite to one server rather than to ration the process.
+ *
+ * This is the standard shape rather than a local invention: a global limit
+ * "will unnecessarily restrict requests to other endpoints as well", so the
+ * advice is a semaphore per endpoint.
+ * @see https://copdips.com/2023/01/python-aiohttp-rate-limit.html
+ *
+ * Note what it does *not* fix, deliberately. A read of the stalled file still
+ * waits forever, because nothing here puts a clock on a transfer and nothing
+ * should — this layer coalesces a run of chunks into one request and those are
+ * routinely large, so any duration limit would cut off a slow download rather
+ * than a broken one. `fetch` has no timeout of its own either, by design and
+ * after long discussion.
+ * @see https://github.com/whatwg/fetch/issues/951
+ * The escape hatch is the caller's `AbortSignal`, which this package carries
+ * all the way to the socket.
+ */
 export const MAX_CONCURRENT = 20
+
+/**
+ * How many file sizes to remember.
+ *
+ * The chunk cache is bounded and swept, so it self-heals; the size cache is
+ * neither, because one number per file is cheap enough to keep and costs a
+ * round trip to re-derive. That reasoning holds for a key per *file* and breaks
+ * for a key per *URL*: presigned S3 and GCS URLs carry an expiring signature in
+ * the query string, so a session re-signing its URLs mints a new key on every
+ * read and this map grows without limit. Bounded, that becomes an eviction
+ * rather than a leak.
+ */
+export const MAX_SIZE_ENTRIES = 5000
 
 /**
  * How long a range request may go without the server beginning to answer.

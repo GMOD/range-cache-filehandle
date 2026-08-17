@@ -14,6 +14,7 @@ import {
   CHUNK_SIZE,
   MAX_CACHE_ENTRIES,
   MAX_CONCURRENT,
+  MAX_SIZE_ENTRIES,
   SWEEP_INTERVAL_MS,
 } from './constants.ts'
 import { copyChunkInto, unrefIfPossible } from './util.ts'
@@ -64,6 +65,16 @@ interface CacheEntry {
 }
 
 /**
+ * Requests in flight against one key, and the reads waiting for a turn.
+ * See {@link MAX_CONCURRENT} for why the pool is per key rather than one pool
+ * for the process.
+ */
+interface Pool {
+  active: number
+  queue: (() => void)[]
+}
+
+/**
  * Fetches an inclusive byte range `[start, end]`, however the underlying source
  * does that. The one thing the chunk cache needs from a file.
  */
@@ -92,12 +103,21 @@ let sizeCache = new Map<string, number>()
  * That is why the owning run is recorded here; see {@link joinChunk}.
  */
 let inFlight = new Map<string, InFlightChunk>()
-let activeCount = 0
-const queue: (() => void)[] = []
+/** one {@link Pool} per key, created on demand and dropped when it empties */
+const pools = new Map<string, Pool>()
+/**
+ * Lookups that must happen once per key however many callers ask at once —
+ * `stat`, in practice. See {@link oncePerKey}.
+ */
+let singleFlight = new Map<string, Promise<unknown>>()
 
 function cacheKey(key: string, chunkIndex: number) {
   return `${key}:${chunkIndex}`
 }
+
+// ---------------------------------------------------------------------------
+// the chunk cache itself
+// ---------------------------------------------------------------------------
 
 function getCached(key: string) {
   const entry = cache.get(key)
@@ -113,6 +133,17 @@ function getCached(key: string) {
   return entry?.bytes
 }
 
+/** drop the least recently used entry of `map` while it is at or over `max` */
+function evictOldest(map: Map<string, unknown>, max: number) {
+  while (map.size >= max) {
+    const oldestKey = map.keys().next().value
+    if (oldestKey === undefined) {
+      return
+    }
+    map.delete(oldestKey)
+  }
+}
+
 function putCached(key: string, chunk: Uint8Array) {
   // Delete before the size check, so that re-caching a key already present
   // neither evicts an innocent entry to make room for one already counted nor
@@ -120,15 +151,30 @@ function putCached(key: string, chunk: Uint8Array) {
   // its position, so without this a chunk that was evicted and re-fetched goes
   // straight back to being first in line to be evicted again.
   cache.delete(key)
-  if (cache.size >= MAX_CACHE_ENTRIES) {
-    const oldestKey = cache.keys().next().value
-    if (oldestKey !== undefined) {
-      cache.delete(oldestKey)
-    }
-  }
+  evictOldest(cache, MAX_CACHE_ENTRIES)
   cache.set(key, { bytes: chunk, lastTouched: Date.now() })
   startSweep()
 }
+
+/**
+ * Whether the file is known to end at or before where this chunk starts.
+ *
+ * The difference between an EOF marker and an empty answer nobody can explain.
+ * An empty chunk is cached as a marker so later reads stop asking for bytes past
+ * the end — but cached on the strength of an *unexplained* empty response, that
+ * marker is indistinguishable from data loss, and it persists for the whole idle
+ * window across every handle sharing the key. Measured: one spurious 416 made a
+ * read return zero bytes, and made the *next* read of the same offset return
+ * zero bytes without going to the network at all.
+ */
+function isKnownPastEof(key: string, chunkIndex: number) {
+  const size = sizeCache.get(key)
+  return size !== undefined && chunkIndex * CHUNK_SIZE >= size
+}
+
+// ---------------------------------------------------------------------------
+// idle sweep
+// ---------------------------------------------------------------------------
 
 let sweepTimer: ReturnType<typeof setInterval> | undefined
 
@@ -141,8 +187,8 @@ let sweepTimer: ReturnType<typeof setInterval> | undefined
  * is harmless. A chunk dropped here that somebody still wants is re-fetched.
  *
  * Deliberately narrower than {@link clearCache}: it touches neither `inFlight`
- * nor `queue`, whose entries are by definition active, and it keeps `sizeCache`,
- * which is one number per key and costs a round trip to re-derive.
+ * nor the pools, whose entries are by definition active, and it keeps
+ * `sizeCache`, which is one number per key and costs a round trip to re-derive.
  *
  * Exported so a caller can reclaim on its own schedule — a tab going hidden,
  * say — rather than only on the interval. The interval is what makes this work
@@ -178,61 +224,158 @@ function stopSweep() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// clearing
+// ---------------------------------------------------------------------------
+
 /**
  * Drop every cached chunk, every known size and every queued read.
  *
  * Mostly for tests, which need each case to start from an empty cache, and for a
- * consumer that knows it is finished with everything it has opened.
+ * consumer that knows it is finished with everything it has opened. To reclaim
+ * one file rather than all of them, see {@link clearCacheFor}.
  */
 export function clearCache() {
   cache = new Map<string, CacheEntry>()
   sizeCache = new Map<string, number>()
+  singleFlight = new Map<string, Promise<unknown>>()
   // the new cache is empty, so nothing is left for the sweep to find; putCached
   // starts it again with the next chunk
   stopSweep()
   // A leaked fetch that settles after this still removes its own entry from the
   // new map only if it is still the owner, so dropping the old map is safe.
   inFlight = new Map<string, InFlightChunk>()
-  // Reset concurrency state too. A leaked async fetch from a prior test that
-  // resolves after clearCache will still decrement activeCount in its finally
-  // block — so this can momentarily push activeCount negative, which is
-  // harmless (runNext still allows new work) and self-corrects once any leaked
-  // work has resolved.
-  //
-  // Queued waiters are RESUMED, not dropped: a dropped resolver strands its
-  // limitConcurrency caller with no resolve and no reject, so the read neither
-  // runs nor settles — a hang rather than a cancellation. Each resumed waiter
-  // claims a slot the way runNext would and releases it in its own finally.
-  const waiters = queue.splice(0)
-  activeCount = waiters.length
-  for (const resolve of waiters) {
-    resolve()
+  resumeAllWaiters()
+}
+
+/**
+ * Drop one file's cached chunks and its size, leaving every other file alone.
+ *
+ * What a consumer closing one track wants, and what {@link clearCache} is too
+ * blunt for. Chunk keys are prefixed with the file key, so this is a scan of the
+ * cache — bounded by {@link MAX_CACHE_ENTRIES}, and only on an explicit call.
+ *
+ * Deliberately does not touch in-flight requests: a read still waiting on one is
+ * entitled to its bytes, and its own cleanup removes it.
+ */
+export function clearCacheFor(key: string) {
+  const prefix = `${key}:`
+  for (const chunkKey of cache.keys()) {
+    if (chunkKey.startsWith(prefix)) {
+      cache.delete(chunkKey)
+    }
+  }
+  sizeCache.delete(key)
+  if (cache.size === 0) {
+    stopSweep()
   }
 }
 
-function runNext() {
-  if (queue.length > 0 && activeCount < MAX_CONCURRENT) {
+// ---------------------------------------------------------------------------
+// concurrency, per key
+// ---------------------------------------------------------------------------
+
+function poolFor(key: string) {
+  let pool = pools.get(key)
+  if (pool === undefined) {
+    pool = { active: 0, queue: [] }
+    pools.set(key, pool)
+  }
+  return pool
+}
+
+/** drop a pool once nothing is using it, so a rotating URL cannot accumulate */
+function releasePool(key: string, pool: Pool) {
+  if (pool.active === 0 && pool.queue.length === 0 && pools.get(key) === pool) {
+    pools.delete(key)
+  }
+}
+
+function runNext(key: string, pool: Pool) {
+  if (pool.queue.length > 0 && pool.active < MAX_CONCURRENT) {
     // claim the slot on behalf of the work we're about to resume
-    activeCount++
-    queue.shift()!()
+    pool.active++
+    pool.queue.shift()!()
+  }
+  releasePool(key, pool)
+}
+
+/**
+ * Resume every queued read across every pool, claiming a slot for each the way
+ * {@link runNext} would.
+ *
+ * Queued waiters are RESUMED, not dropped: a dropped resolver strands its
+ * {@link limitConcurrency} caller with no resolve and no reject, so the read
+ * neither runs nor settles — a hang rather than a cancellation.
+ *
+ * `active` is incremented rather than assigned. Assigning it discards the count
+ * of work that is genuinely still running, so the pool believes it has room it
+ * does not have: measured, twenty requests in flight through a `clearCache` let
+ * the next reads reach forty concurrent against a cap of twenty, and left the
+ * count negative afterwards to do it again.
+ */
+function resumeAllWaiters() {
+  for (const [key, pool] of pools) {
+    const waiters = pool.queue.splice(0)
+    pool.active += waiters.length
+    for (const resolve of waiters) {
+      resolve()
+    }
+    releasePool(key, pool)
   }
 }
 
-export async function limitConcurrency<T>(fn: () => Promise<T>) {
-  if (activeCount < MAX_CONCURRENT) {
-    activeCount++
+export async function limitConcurrency<T>(key: string, fn: () => Promise<T>) {
+  const pool = poolFor(key)
+  if (pool.active < MAX_CONCURRENT) {
+    pool.active++
   } else {
     // runNext claims the slot before resuming us, so nothing to increment here
     await new Promise<void>(resolve => {
-      queue.push(resolve)
+      pool.queue.push(resolve)
     })
   }
   try {
     return await fn()
   } finally {
-    activeCount--
-    runNext()
+    pool.active--
+    runNext(key, pool)
   }
+}
+
+/**
+ * Run `fn` once per key however many callers ask for it at once, and let them
+ * all await the same result.
+ *
+ * `stat` is the caller. It is guarded by `hasSize`, but that guard only sees
+ * sizes that have already arrived, so N handles opening a file together each
+ * found the size missing and each issued its own request — measured, ten
+ * concurrent `stat()` calls made ten requests for one number.
+ */
+export function oncePerKey<T>(key: string, fn: () => Promise<T>) {
+  const existing = singleFlight.get(key) as Promise<T> | undefined
+  if (existing !== undefined) {
+    return existing
+  }
+  const started = fn()
+  const forget = () => {
+    if (singleFlight.get(key) === started) {
+      singleFlight.delete(key)
+    }
+  }
+  started.then(forget, forget)
+  singleFlight.set(key, started)
+  return started
+}
+
+// ---------------------------------------------------------------------------
+// file sizes
+// ---------------------------------------------------------------------------
+
+function putSize(key: string, size: number) {
+  sizeCache.delete(key)
+  evictOldest(sizeCache, MAX_SIZE_ENTRIES)
+  sizeCache.set(key, size)
 }
 
 /**
@@ -250,7 +393,7 @@ export async function limitConcurrency<T>(fn: () => Promise<T>) {
  */
 export function recordSize(key: string, size: number) {
   if (Number.isFinite(size)) {
-    sizeCache.set(key, size)
+    putSize(key, size)
   }
 }
 
@@ -263,25 +406,19 @@ export function getSize(key: string) {
 }
 
 /**
- * Record a file's total size from a `Content-Range` header — `bytes 0-255/12345`
- * on a 206, `bytes * /12345` on a 416. An already-known size is left alone (the
- * file is not expected to change under us mid-session).
+ * Record a file's total size once, from wherever it was observed. An
+ * already-known size is left alone (the file is not expected to change under us
+ * mid-session).
  */
-export function recordSizeFromContentRange(key: string, res: Response) {
-  if (!sizeCache.has(key)) {
-    const contentRange = res.headers.get('content-range')
-    const match = contentRange ? /\/(\d+)$/.exec(contentRange) : null
-    if (match) {
-      sizeCache.set(key, Number.parseInt(match[1]!, 10))
-    }
+export function recordSizeIfUnknown(key: string, size: number | undefined) {
+  if (size !== undefined && !sizeCache.has(key)) {
+    putSize(key, size)
   }
 }
 
-export function recordSizeFromWholeBody(key: string, byteLength: number) {
-  if (!sizeCache.has(key)) {
-    sizeCache.set(key, byteLength)
-  }
-}
+// ---------------------------------------------------------------------------
+// runs
+// ---------------------------------------------------------------------------
 
 function fetchRun(
   key: string,
@@ -299,12 +436,15 @@ function fetchRun(
   // The request runs under the run's own signal, not the opening reader's: it
   // is shared, so it must outlive any one reader giving up. joinRun registers
   // them, starting with the reader that opened it.
-  const data = limitConcurrency(() =>
-    doFetch(run.start * CHUNK_SIZE, (run.end + 1) * CHUNK_SIZE - 1, {
+  const data = limitConcurrency(key, () => {
+    // every reader gave up while this was queued, so there is nothing to ask
+    // for. On a pan that is the ordinary case rather than a corner
+    state.controller.signal.throwIfAborted()
+    return doFetch(run.start * CHUNK_SIZE, (run.end + 1) * CHUNK_SIZE - 1, {
       ...init,
       signal: state.controller.signal,
-    }),
-  )
+    })
+  })
   joinRun(state, init?.signal)
   const settle = () => {
     state.settled = true
@@ -316,35 +456,51 @@ function fetchRun(
   data.then(settle, settle)
   const pending: PendingChunk[] = []
   for (let index = run.start; index <= run.end; index++) {
-    const chunkKey = cacheKey(key, index)
-    const offset = (index - run.start) * CHUNK_SIZE
-    // A run crossing EOF comes back short: its last chunk with data is short
-    // and any chunk past that is empty. Both are cached as-is, so a later read
-    // sees the EOF marker instead of re-requesting past EOF.
-    //
-    // slice, not subarray: a view would keep the whole run buffer alive for as
-    // long as any one of its chunks stays cached, so evicting a chunk would
-    // free nothing and MAX_CACHE_ENTRIES would bound nothing.
-    const chunk = data.then(buffer => {
-      const copy = buffer.slice(offset, offset + CHUNK_SIZE)
-      putCached(chunkKey, copy)
-      return copy
-    })
-    const entry = { chunk, run: state }
-    inFlight.set(chunkKey, entry)
-    const forget = () => {
-      // only if still the owner: clearCache, or a later run for the same
-      // chunk, may have replaced this entry
-      if (inFlight.get(chunkKey) === entry) {
-        inFlight.delete(chunkKey)
-      }
-    }
-    // runs after the putCached above, so a chunk is never absent from both the
-    // cache and this map
-    void chunk.then(forget, forget)
-    pending.push({ index, chunk })
+    pending.push({ index, chunk: publishChunk(key, run, index, data, state) })
   }
   return pending
+}
+
+/**
+ * Derive one chunk from the run that covers it, publish it for other reads to
+ * join, and cache it once it arrives.
+ */
+function publishChunk(
+  key: string,
+  run: ChunkRun,
+  index: number,
+  data: Promise<Uint8Array>,
+  state: RunState,
+) {
+  const chunkKey = cacheKey(key, index)
+  const offset = (index - run.start) * CHUNK_SIZE
+  // A run crossing EOF comes back short: its last chunk with data is short
+  // and any chunk past that is empty. Both are cached as-is, so a later read
+  // sees the EOF marker instead of re-requesting past EOF.
+  //
+  // slice, not subarray: a view would keep the whole run buffer alive for as
+  // long as any one of its chunks stays cached, so evicting a chunk would
+  // free nothing and MAX_CACHE_ENTRIES would bound nothing.
+  const chunk = data.then(buffer => {
+    const copy = buffer.slice(offset, offset + CHUNK_SIZE)
+    if (copy.length > 0 || isKnownPastEof(key, index)) {
+      putCached(chunkKey, copy)
+    }
+    return copy
+  })
+  const entry = { chunk, run: state }
+  inFlight.set(chunkKey, entry)
+  const forget = () => {
+    // only if still the owner: clearCache, or a later run for the same
+    // chunk, may have replaced this entry
+    if (inFlight.get(chunkKey) === entry) {
+      inFlight.delete(chunkKey)
+    }
+  }
+  // runs after the putCached above, so a chunk is never absent from both the
+  // cache and this map
+  void chunk.then(forget, forget)
+  return chunk
 }
 
 /**
@@ -369,9 +525,7 @@ function joinRun(state: RunState, signal: RequestInit['signal']) {
     // `getCachedRange` rejects such a reader before it gets here, so this is
     // the belt to that braces — the invariant is too quiet to fail to be left
     // resting on a check several frames away.
-    if (!state.pinned && state.signals.size === 0) {
-      state.controller.abort(signal.reason)
-    }
+    abortIfUnwanted(state, signal.reason)
   } else if (!state.signals.has(signal)) {
     // guarded so one signal joining twice — a read spanning several chunks of
     // the same run — does not add two listeners
@@ -380,13 +534,18 @@ function joinRun(state: RunState, signal: RequestInit['signal']) {
       'abort',
       () => {
         state.signals.delete(signal)
-        if (!state.pinned && state.signals.size === 0) {
-          state.controller.abort(signal.reason)
-        }
+        abortIfUnwanted(state, signal.reason)
       },
       // `once` covers the abort firing; `dispose` covers it never firing
       { once: true, signal: state.dispose.signal },
     )
+  }
+}
+
+/** cancel a run's request once no reader is left who wants it */
+function abortIfUnwanted(state: RunState, reason: unknown) {
+  if (!state.pinned && state.signals.size === 0) {
+    state.controller.abort(reason)
   }
 }
 
@@ -429,6 +588,125 @@ function joinChunk(flight: InFlightChunk, init?: RequestInit) {
   return flight.chunk
 }
 
+// ---------------------------------------------------------------------------
+// the read path
+// ---------------------------------------------------------------------------
+
+interface ReadPlan {
+  /** chunks already in hand, held strongly so eviction cannot take them back */
+  chunks: Map<number, Uint8Array>
+  /** chunks arriving, whether joined from another read or fetched by this one */
+  pending: PendingChunk[]
+  /** last chunk assembly should look at; lowered when a cached chunk ends the file */
+  endChunk: number
+}
+
+/**
+ * Decide what this read needs and set it in motion.
+ *
+ * Contiguous runs of missing chunks become one range request each; a chunk
+ * another read is already fetching is awaited instead. Planning and publishing
+ * run to completion without an await, so two reads in the same tick cannot both
+ * open a run for the same chunk.
+ *
+ * Stops at a cached chunk shorter than CHUNK_SIZE — the file ended inside it, so
+ * every later chunk starts past EOF. That covers a read that runs past the end
+ * even when the size is unknown (CORS hiding Content-Range).
+ */
+function planRead(
+  key: string,
+  startChunk: number,
+  lastChunk: number,
+  init: RequestInit | undefined,
+  doFetch: FetchByteRange,
+): ReadPlan {
+  const chunks = new Map<number, Uint8Array>()
+  const pending: PendingChunk[] = []
+  const runs: ChunkRun[] = []
+  let endChunk = lastChunk
+  for (let index = startChunk; index <= lastChunk; index++) {
+    const cached = getCached(cacheKey(key, index))
+    if (cached !== undefined) {
+      chunks.set(index, cached)
+      if (cached.length < CHUNK_SIZE) {
+        endChunk = index
+        break
+      }
+    } else {
+      const joined = joinInFlight(key, index, init)
+      if (joined === undefined) {
+        extendRuns(runs, index)
+      } else {
+        pending.push({ index, chunk: joined })
+      }
+    }
+  }
+  for (const run of runs) {
+    pending.push(...fetchRun(key, run, init, doFetch))
+  }
+  return { chunks, pending, endChunk }
+}
+
+function joinInFlight(
+  key: string,
+  index: number,
+  init: RequestInit | undefined,
+) {
+  const flight = inFlight.get(cacheKey(key, index))
+  return flight ? joinChunk(flight, init) : undefined
+}
+
+/** append `index` to the run in progress, or start a new one */
+function extendRuns(runs: ChunkRun[], index: number) {
+  const lastRun = runs.at(-1)
+  if (lastRun?.end === index - 1) {
+    lastRun.end = index
+  } else {
+    runs.push({ start: index, end: index })
+  }
+}
+
+/**
+ * Copy every chunk this read covers into one buffer, and report where the real
+ * data stops.
+ *
+ * Assembly reads only from `chunks`, never from the module-global cache: that
+ * cache is capped and shared across every file, so a concurrent read's
+ * `putCached` can evict a chunk we depend on while we await, and a later
+ * `getCached` would return undefined. Holding the reference locally makes
+ * eviction harmless.
+ */
+function assembleRange(
+  key: string,
+  { chunks, endChunk }: ReadPlan,
+  start: number,
+  end: number,
+  startChunk: number,
+) {
+  const result = new Uint8Array(Math.max(0, end - start))
+  let dataEnd = end
+  for (let i = startChunk; i <= endChunk; i++) {
+    const chunk = chunks.get(i)
+    // Unreachable: every index in [startChunk, endChunk] was either captured
+    // as an already-cached chunk or filled by the run covering it. Throw
+    // rather than assert so a future refactor that breaks the invariant fails
+    // loudly instead of silently assembling a buffer of zeros.
+    if (chunk === undefined) {
+      throw new Error(
+        `internal: chunk ${i} missing during range assembly of ${key}`,
+      )
+    }
+    copyChunkInto({ result, start, end, chunkIndex: i, chunk })
+    if (chunk.length < CHUNK_SIZE) {
+      // the file ends inside this chunk, so nothing past that is real data
+      dataEnd = Math.min(dataEnd, i * CHUNK_SIZE + chunk.length)
+      break
+    }
+  }
+  // max(0) because a read wholly past EOF has dataEnd < start
+  return result.subarray(0, Math.max(0, dataEnd - start))
+}
+
 export async function getCachedRange(
   key: string,
   start: number,
@@ -453,57 +731,10 @@ export async function getCachedRange(
   const startChunk = Math.floor(start / CHUNK_SIZE)
   const lastChunk = Math.floor((end - 1) / CHUNK_SIZE)
 
-  // Hold a strong reference to every chunk we'll assemble from. Already-cached
-  // chunks are captured here (before any await); fetched ones as their run
-  // resolves below. Assembly reads only from this local map, never from the
-  // module-global cache: that cache is capped and shared across every file, so
-  // a concurrent read's putCached can evict a chunk we depend on during our
-  // fetch await, and a later getCached would return undefined. Holding the
-  // reference locally makes eviction from the Map harmless.
-  const chunks = new Map<number, Uint8Array>()
-
-  // Plan the fetches. Contiguous runs of missing chunks become one range
-  // request each; a chunk another read is already fetching is awaited instead.
-  // Planning and publishing run to completion without an await, so two reads
-  // in the same tick can't both open a run for the same chunk.
-  //
-  // Stops at a cached chunk shorter than CHUNK_SIZE — the file ended inside it,
-  // so every later chunk starts past EOF. That covers the over-read above even
-  // when the size is unknown (CORS hiding Content-Range).
-  const pending: PendingChunk[] = []
-  const runs: ChunkRun[] = []
-  let endChunk = lastChunk
-  for (let index = startChunk; index <= lastChunk; index++) {
-    const chunkKey = cacheKey(key, index)
-    const cached = getCached(chunkKey)
-    if (cached === undefined) {
-      const flight = inFlight.get(chunkKey)
-      const joined = flight ? joinChunk(flight, init) : undefined
-      if (joined === undefined) {
-        const lastRun = runs.at(-1)
-        if (lastRun?.end === index - 1) {
-          lastRun.end = index
-        } else {
-          runs.push({ start: index, end: index })
-        }
-      } else {
-        pending.push({ index, chunk: joined })
-      }
-    } else {
-      chunks.set(index, cached)
-      if (cached.length < CHUNK_SIZE) {
-        endChunk = index
-        break
-      }
-    }
-  }
-  for (const run of runs) {
-    pending.push(...fetchRun(key, run, init, doFetch))
-  }
-
+  const plan = planRead(key, startChunk, lastChunk, init, doFetch)
   await Promise.all(
-    pending.map(async ({ index, chunk }) => {
-      chunks.set(index, await chunk)
+    plan.pending.map(async ({ index, chunk }) => {
+      plan.chunks.set(index, await chunk)
     }),
   )
   // The bytes arrived, but this read gave up while waiting for them — the
@@ -511,27 +742,5 @@ export async function getCachedRange(
   // Cancellation is per-reader even though the fetch is not.
   init?.signal?.throwIfAborted()
 
-  const result = new Uint8Array(Math.max(0, end - start))
-  let dataEnd = end
-  for (let i = startChunk; i <= endChunk; i++) {
-    const chunk = chunks.get(i)
-    // Unreachable: every index in [startChunk, endChunk] was either captured
-    // as an already-cached chunk or filled by the run covering it. Throw
-    // rather than assert so a future refactor that breaks the invariant fails
-    // loudly instead of silently assembling a buffer of zeros.
-    if (chunk === undefined) {
-      throw new Error(
-        `internal: chunk ${i} missing during range assembly of ${key}`,
-      )
-    } else {
-      copyChunkInto({ result, start, end, chunkIndex: i, chunk })
-      if (chunk.length < CHUNK_SIZE) {
-        // the file ends inside this chunk, so nothing past that is real data
-        dataEnd = Math.min(dataEnd, i * CHUNK_SIZE + chunk.length)
-        break
-      }
-    }
-  }
-  // max(0) because a read wholly past EOF has dataEnd < start
-  return result.subarray(0, Math.max(0, dataEnd - start))
+  return assembleRange(key, plan, start, end, startChunk)
 }

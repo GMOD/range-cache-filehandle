@@ -136,12 +136,25 @@ dropped resolver strands its caller with neither a resolve nor a reject — a ha
 rather than a cancellation. To actually stop work, abort the signals you passed
 to it.
 
+## `clearCacheFor(key)`
+
+Drop one file's cached chunks and its known size, leaving every other file
+alone. What a consumer closing one track wants, where `clearCache()` is too
+blunt. The key is the same one the file was opened with — the URL for a
+`RemoteFileWithRangeCache`, the second constructor argument for a
+`CachedFilehandle`.
+
+Like `clearCache`, it does not cancel work in flight: a read still waiting on a
+request is entitled to the bytes it asked for, and that request cleans up after
+itself.
+
 ## Constants
 
-`CHUNK_SIZE`, `MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT` and
-`RESPONSE_TIMEOUT_MS` are exported for reading, not setting — the cache is
-module-global, so a knob on one filehandle would be policy for every other one
-in the process. [tuning.md](tuning.md) is what each is and what measured it.
+`CHUNK_SIZE`, `MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT`,
+`MAX_SIZE_ENTRIES` and `RESPONSE_TIMEOUT_MS` are exported for reading, not
+setting — the cache is module-global, so a knob on one filehandle would be
+policy for every other one in the process. [tuning.md](tuning.md) is what each
+is and what measured it.
 
 Reading them is genuinely useful, though. `CHUNK_SIZE` is the granularity your
 reads are rounded to, so it is the number to compare an index's chunk sizes

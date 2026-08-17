@@ -5,9 +5,9 @@ import {
   getSize,
   hasSize,
   limitConcurrency,
+  oncePerKey,
   recordSize,
-  recordSizeFromContentRange,
-  recordSizeFromWholeBody,
+  recordSizeIfUnknown,
 } from './chunkCache.ts'
 import { RESPONSE_TIMEOUT_MS } from './constants.ts'
 import {
@@ -16,7 +16,7 @@ import {
   statusHint,
   withResponseDeadline,
 } from './errors.ts'
-import { assertReadArgs, parseByteRange } from './util.ts'
+import { assertReadArgs, parseByteRange, parseContentRange } from './util.ts'
 
 import type { FilehandleOptions } from 'generic-filehandle2'
 
@@ -50,8 +50,12 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       // fetchRange, leaving the size cache empty. fetchRange always observes
       // Content-Range and updates it directly. Still goes through
       // limitConcurrency — a stat is a real request against the same server,
-      // and N readers opening at once used to issue N stats outside the cap.
-      await limitConcurrency(() => this.fetchRange(this.url, 0, 0))
+      // and N readers opening at once used to issue N stats outside the cap —
+      // and through oncePerKey, so those N readers share one request rather
+      // than making N of them for one number.
+      await oncePerKey(this.url, () =>
+        limitConcurrency(this.url, () => this.fetchRange(this.url, 0, 0)),
+      )
     }
     const size = getSize(this.url)
     if (size === undefined) {
@@ -77,6 +81,72 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     end: number,
     init?: RequestInit,
   ) {
+    const { res, deadline } = await this.fetchWithDeadline(
+      url,
+      start,
+      end,
+      init,
+    )
+    try {
+      return await this.readRange(res, url, start, end)
+    } finally {
+      // only now: until the body is read, this is what carries a caller's
+      // cancellation down to the socket
+      deadline.dispose()
+    }
+  }
+
+  /** the bytes of a response, once its status and its claims check out */
+  private async readRange(
+    res: Response,
+    url: string,
+    start: number,
+    end: number,
+  ) {
+    if (res.status === 416) {
+      // Range Not Satisfiable: requested range starts past end of file. RFC 9110
+      // §15.5.17 has the server report the real length here, as `bytes * /12345`
+      // (the unsatisfied-range form of Content-Range, §14.4), and
+      // that is the one thing this response carries worth keeping: learning the
+      // size lets getCachedRange clamp every later over-read instead of asking
+      // for past-EOF chunks and being refused again. It is also the only way
+      // stat() can answer for an empty file, every range of which is
+      // unsatisfiable.
+      //
+      // The empty result is only cached as an EOF marker if the size it carried
+      // confirms the range really was past the end; see isKnownPastEof. A 416
+      // that explains nothing is answered, but not remembered.
+      recordSizeIfUnknown(
+        url,
+        parseContentRange(res.headers.get('content-range'))?.total,
+      )
+      return new Uint8Array(0)
+    }
+    assertServedTheRange(res, url, start, end)
+    const buffer = new Uint8Array(await res.arrayBuffer())
+    // The first successful range fetch populates the size cache, so a later
+    // stat() needs no HEAD of its own.
+    if (res.status === 200) {
+      // no Content-Range on a 200, but the body is the entire file
+      recordSizeIfUnknown(url, buffer.byteLength)
+    } else {
+      const range = parseContentRange(res.headers.get('content-range'))
+      recordSizeIfUnknown(url, range?.total)
+      assertBodyMatchesRange(res, url, start, buffer, range)
+    }
+    return buffer
+  }
+
+  /**
+   * `super.fetch` for one byte range, under a deadline on the server beginning
+   * to answer, with a network-level rejection turned into something readable.
+   */
+  private async fetchWithDeadline(
+    url: string,
+    start: number,
+    end: number,
+    init: RequestInit | undefined,
+  ) {
     // Preserve everything the caller put on the request — auth headers,
     // credentials, the abort signal, RemoteFile.read's buildRequest overrides —
     // and replace only the range.
@@ -92,67 +162,22 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       () =>
         `No response from ${url} for bytes ${start}-${end} after ${RESPONSE_TIMEOUT_MS / 1000}s (the connection was open and the server sent nothing; a transfer already under way is not subject to this limit, so this is a stalled request rather than a slow one)`,
     )
-    let res: Response
     try {
-      res = await super.fetch(url, {
+      const res = await super.fetch(url, {
         ...init,
         headers,
         signal: deadline.signal,
       })
+      // the response is here; from here the body may take as long as it takes
+      deadline.responded()
+      // Deliberately not disposed here. The deadline stays linked to the
+      // caller's signal until the body has been read, because that link is what
+      // carries a cancellation down to the socket; `fetchRange` disposes it.
+      return { res, deadline }
     } catch (e) {
-      if (deadline.expired) {
-        throw deadline.expired
-      } else if (isNetworkRejection(e) && !deadline.signal.aborted) {
-        // `!aborted` because an implementation that reports a cancellation as a
-        // TypeError rather than as the signal's reason would otherwise have a
-        // cancelled pan explained as a CORS misconfiguration, which is the worst
-        // place to be confidently wrong.
-        throw new Error(
-          `Network error fetching ${url} bytes ${start}-${end}${networkFailureHint(url)}`,
-          { cause: e },
-        )
-      } else {
-        throw e
-      }
-    } finally {
-      // either the response is here or the request is over; from here the body
-      // may take as long as it takes
       deadline.dispose()
+      throw describeFetchFailure(e, deadline, url, start, end)
     }
-    if (res.status === 416) {
-      // Range Not Satisfiable: requested range starts past end of file. RFC 9110
-      // has the server report the real length here, as `bytes * /12345`, and
-      // that is the one thing this response carries worth keeping: learning the
-      // size lets getCachedRange clamp every later over-read instead of asking
-      // for past-EOF chunks and being refused again. It is also the only way
-      // stat() can answer for an empty file, every range of which is
-      // unsatisfiable.
-      recordSizeFromContentRange(url, res)
-      return new Uint8Array(0)
-    }
-    // A 200 means the server ignored the Range header and sent the whole file
-    // (some servers do this rather than clamping a range whose end is past EOF).
-    // The body then starts at byte 0, but callers slice it at the offsets they
-    // asked for, so every chunk past the first would be filled with data from the
-    // wrong position — silently, and typically surfacing much later as a parse
-    // error like "invalid bgzf header". Only tolerate it when the request started
-    // at 0, where the body genuinely covers the requested bytes. This mirrors
-    // generic-filehandle2's RemoteFile.read, whose equivalent check this class
-    // bypasses by synthesizing its own 206 Response in fetch() below.
-    if (!res.ok || (res.status !== 206 && start !== 0)) {
-      const msg = `HTTP ${res.status} fetching ${url} bytes ${start}-${end}${statusHint(res.status)}`
-      throw Object.assign(new Error(msg), { status: res.status })
-    }
-    const buffer = new Uint8Array(await res.arrayBuffer())
-    // The first successful range fetch populates the size cache, so a later
-    // stat() needs no HEAD of its own.
-    if (res.status === 200) {
-      // no Content-Range on a 200, but the body is the entire file
-      recordSizeFromWholeBody(url, buffer.byteLength)
-    } else {
-      recordSizeFromContentRange(url, res)
-    }
-    return buffer
   }
 
   // named apart from the module-level getCachedRange it calls, which is the one
@@ -228,5 +253,105 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       }
     }
     return super.fetch(url, init)
+  }
+}
+
+/**
+ * Turn a rejection with no response behind it into a message that says what to
+ * check, keeping anything that already has a status.
+ */
+function describeFetchFailure(
+  e: unknown,
+  deadline: { expired?: Error; signal: AbortSignal },
+  url: string,
+  start: number,
+  end: number,
+) {
+  if (deadline.expired) {
+    return deadline.expired
+  } else if (isNetworkRejection(e) && !deadline.signal.aborted) {
+    // `!aborted` because an implementation that reports a cancellation as a
+    // TypeError rather than as the signal's reason would otherwise have a
+    // cancelled pan explained as a CORS misconfiguration, which is the worst
+    // place to be confidently wrong.
+    return new Error(
+      `Network error fetching ${url} bytes ${start}-${end}${networkFailureHint(url)}`,
+      { cause: e },
+    )
+  } else {
+    return e
+  }
+}
+
+/**
+ * Reject a status that cannot be read as the range that was asked for.
+ *
+ * A 200 means the server ignored the Range header and sent the whole file (some
+ * servers do this rather than clamping a range whose end is past EOF). The body
+ * then starts at byte 0, but callers slice it at the offsets they asked for, so
+ * every chunk past the first would be filled with data from the wrong position —
+ * silently, and typically surfacing much later as a parse error like "invalid
+ * bgzf header". Only tolerate it when the request started at 0, where the body
+ * genuinely covers the requested bytes. This mirrors generic-filehandle2's
+ * RemoteFile.read, whose equivalent check this class bypasses by synthesizing
+ * its own 206 Response in fetch().
+ */
+function assertServedTheRange(
+  res: Response,
+  url: string,
+  start: number,
+  end: number,
+) {
+  if (!res.ok || (res.status !== 206 && start !== 0)) {
+    const msg = `HTTP ${res.status} fetching ${url} bytes ${start}-${end}${statusHint(res.status)}`
+    throw Object.assign(new Error(msg), { status: res.status })
+  }
+}
+
+/**
+ * Reject a 206 whose body is not the bytes it claims to be.
+ *
+ * Nothing downstream can tell a short response from the end of the file: a chunk
+ * shorter than CHUNK_SIZE *is* how EOF is represented, so a proxy that truncates
+ * a body, or a cache that answers with some other range it had lying around,
+ * lands in the chunk cache as a file that ends early. Measured with a proxy
+ * cutting each body to 1000 bytes, a read at offset 5000 of a 2 MB file returned
+ * zero bytes and issued no request — and kept doing so for the whole idle
+ * window, for every handle sharing the URL.
+ *
+ * So the two things the server told us are checked against what it sent: the
+ * offset the body starts at, and how long it is. A single-part 206 carries
+ * exactly one range and describes it in `Content-Range`, so those two agreeing
+ * is the guarantee the format offers.
+ * @see https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.7 (206)
+ * @see https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4 (Content-Range)
+ *
+ * Skipped when there is no `Content-Range` to check against, and when a
+ * `Content-Encoding` means the body on the wire is not the bytes of the range.
+ */
+function assertBodyMatchesRange(
+  res: Response,
+  url: string,
+  start: number,
+  buffer: Uint8Array,
+  range: ReturnType<typeof parseContentRange>,
+) {
+  if (
+    range?.start === undefined ||
+    range.end === undefined ||
+    res.headers.get('content-encoding')
+  ) {
+    return
+  }
+  if (range.start !== start) {
+    throw new Error(
+      `${url} answered bytes ${range.start}-${range.end} for a request for bytes starting at ${start} (the response does not describe the range that was asked for, so its bytes would land at the wrong offsets; a caching proxy in front of the file is the usual cause)`,
+    )
+  }
+  const expected = range.end - range.start + 1
+  if (buffer.byteLength !== expected) {
+    throw new Error(
+      `${url} sent ${buffer.byteLength} bytes for bytes ${range.start}-${range.end}, which is ${expected} bytes (the body is truncated; left alone this is indistinguishable from the file ending here and would be cached as such)`,
+    )
   }
 }

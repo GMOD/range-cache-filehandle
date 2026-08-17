@@ -10,6 +10,9 @@ export default defineConfig(
       'dist/*',
       'esm/*',
       'example/*',
+      // `vitest --coverage` writes its own JS reporter assets here. Gitignored,
+      // but eslint does not read .gitignore, and no tsconfig includes them
+      'coverage/**',
       'eslint.config.mjs',
       // agent worktrees are whole checkouts of this repo living inside it, so
       // without this eslint lints every one of them against the root
