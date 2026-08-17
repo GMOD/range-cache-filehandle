@@ -6,6 +6,11 @@
 A `GenericFilehandle` that caches byte ranges in chunks and coalesces adjacent
 reads into one request.
 
+An indexed genomics parser reads in a pattern the network is bad at: many small,
+adjacent, semi-random ranges, most of them near ones it just read. This layer
+sits under the parser and turns that into a few large requests, then serves the
+next query's overlapping reads from memory.
+
 ```sh
 npm install @gmod/range-cache-filehandle
 ```
@@ -49,13 +54,24 @@ const file = new CachedFilehandle(new LocalFile(path), `file://${path}`)
 - Names a cause on failure: CORS, mixed content, a server ignoring the Range
   header, a connection that goes 30s without answering.
 
-Nothing is retried.
+Nothing is retried. [docs/dataflow.md](docs/dataflow.md) has the diagram and
+walks one read through all of it.
 
 ## Tuning
 
 `CHUNK_SIZE`, `MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT` and
-`RESPONSE_TIMEOUT_MS` are exported for reading, not setting. `src/constants.ts`
-records what each was measured against.
+`RESPONSE_TIMEOUT_MS` are exported for reading, not setting — the cache is
+module-global, so a knob on one filehandle would set policy for every other one
+in the process. What each was measured against is in `src/constants.ts` and in
+[docs/tuning.md](docs/tuning.md).
+
+## Docs
+
+- [docs/dataflow.md](docs/dataflow.md) — how a read flows, with the diagram
+- [docs/sharing.md](docs/sharing.md) — one request, several readers, and whose
+  abort cancels it
+- [docs/tuning.md](docs/tuning.md) — the five constants and what measured them
+- [docs/errors.md](docs/errors.md) — what each failure says and why
 
 ## Provenance
 

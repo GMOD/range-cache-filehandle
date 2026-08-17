@@ -1,0 +1,88 @@
+# Sharing a request between readers
+
+Two reads that need the same 256 KiB chunk issue one request. That is easy to
+say and most of the subtlety in this package, because the moment a request is
+shared, one reader's `AbortSignal` is a decision about somebody else's bytes.
+
+The rule the code implements: **the unit of fetching is a run, the unit of
+joining is a chunk, and the unit of cancelling is a reader.**
+
+## The three units
+
+A **run** is a contiguous stretch of missing chunks covered by one range
+request. A **chunk** is one 256 KiB cell of the grid; a second read joins at
+chunk granularity, since it may want three chunks of a ten-chunk run and nothing
+else. A **reader** is one call to `read()`, with at most one signal.
+
+So the reference count lives on the run — that is what a request maps to — and
+every chunk the run produces points back at it. `RunState` holds the set of
+signals still waiting, an `AbortController` the request actually runs under, and
+a second controller used only to take the listeners back off.
+
+The request runs under the run's own signal, never the opening reader's. A
+shared request has to outlive any one reader giving up, and handing `fetch` the
+first reader's signal would make the first reader's `abort()` everyone's.
+
+## Giving up
+
+When a reader's signal aborts, it comes out of the set. When the set empties,
+the run's controller aborts and the request is cancelled for real — down to the
+socket, which is worth ~6.5 MiB on a cancelled navigation.
+
+Three cases around that are worth naming, because each was a bug before it was a
+rule.
+
+**A reader with no signal pins the run.** There is no set of aborts that should
+stop a request one of whose readers never asked to be cancellable, so the run is
+marked pinned and the count stops mattering. One signal-free read makes that
+request uncancellable for everyone sharing it — the honest reading of the API,
+and the reason to pass a signal even when you do not plan to abort.
+
+**A reader that has already aborted is not a waiter.** An `abort` listener never
+fires on a signal that aborted before the listener was added, so an
+already-aborted signal added to the set would never come back out, the count
+would never reach zero, and the request would be uncancellable for everyone —
+silently. `getCachedRange` rejects such a reader at its first line, and
+`joinRun` checks again, because an invariant this quiet should not rest on a
+check several frames away.
+
+**A run whose readers all gave up is not joinable.** Its request was cancelled,
+but the rejection takes a tick to arrive and the `inFlight` entry is not removed
+until after that, so in between it sits there looking joinable. Joining it hands
+the new reader somebody else's `AbortError`. On a pan that window is the
+ordinary sequence rather than a corner case: the old blocks are aborted and the
+new ones requested in the same tick, and adjacent blocks routinely want the same
+chunk. `joinChunk` refuses, and the reader opens a fresh run — which survives
+the doomed one settling, since cleanup removes only its own entry.
+
+## Why joining rather than re-issuing
+
+An earlier design let a reader's abort reject the chunk and re-issued the fetch
+for whoever still wanted it. Correct, and it threw away a 256 KiB request that
+was already in flight and that somebody still wanted. Reference counting means
+there is nothing to re-issue: the request is simply not cancelled while anyone
+is still waiting. `@gmod/bam` and `@gmod/cram` do the same at their own cache
+layers.
+
+## Settling
+
+Once the request settles, the run drops its signal set and aborts its `dispose`
+controller, which takes every listener back off the readers' signals — holding
+them would pin each reader's `AbortController` behind a request that is over.
+
+A settled run is still joinable for its bytes but not for its count: `putCached`
+runs after `settle`, so there is a window where the bytes have arrived and the
+chunk is in neither the cache nor the in-flight map, and the promise is still
+the right thing to await. Adding a signal to a settled run's set is what must
+not happen — nothing would ever take it out.
+
+## Concurrency
+
+`limitConcurrency` caps requests at 20 across every file in the process,
+queueing the rest. `stat()` goes through it too: it is a real request against
+the same server, and N readers opening at once used to issue N stats outside the
+cap.
+
+`clearCache` resumes queued waiters rather than dropping them. A dropped
+resolver strands its caller with no resolve and no reject — a hang rather than a
+cancellation.

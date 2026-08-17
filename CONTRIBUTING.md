@@ -15,6 +15,20 @@ pnpm version patch  # or minor/major
 That runs lint, format, types, tests and build, regenerates CHANGELOG.md with
 git-cliff, then pushes the tag, which triggers the publish workflow.
 
+## Docs
+
+`docs/img/dataflow.svg` is generated from `docs/img/dataflow.dot` and committed,
+since GitHub does not render DOT. If you edit the `.dot`, re-render it in the
+same commit:
+
+```sh
+dot -Tsvg docs/img/dataflow.dot -o docs/img/dataflow.svg
+```
+
+Nothing checks this — graphviz is not a dependency and different versions emit
+different SVG bytes, so a staleness check would fail on toolchain drift rather
+than on a stale diagram.
+
 ## Publishing
 
 Releases publish automatically via GitHub Actions using npm trusted publishing
