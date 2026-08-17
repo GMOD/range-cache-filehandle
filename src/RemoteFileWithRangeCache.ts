@@ -35,6 +35,25 @@ import type { FilehandleOptions } from 'generic-filehandle2'
  */
 export class RemoteFileWithRangeCache extends RemoteFile {
   /**
+   * The options this handle was constructed with.
+   *
+   * Kept rather than reached for, because `RemoteFile` holds them privately and
+   * exposes them only through its own private `buildRequest`. `read` below
+   * deliberately does not go through that method, so without this copy the
+   * constructor's `headers`, `overrides` and `signal` reach nothing at all — see
+   * {@link buildReadRequest}.
+   *
+   * An explicit field rather than a constructor parameter property, which node's
+   * type stripper cannot erase; `erasableSyntaxOnly` bans them.
+   */
+  private baseOpts: FilehandleOptions
+
+  constructor(source: string, opts: FilehandleOptions = {}) {
+    super(source, opts)
+    this.baseOpts = opts
+  }
+
+  /**
    * Publish a size this handle learned other than by a range request.
    *
    * A subclass that overrides `stat` answers from somewhere the chunk cache
@@ -230,11 +249,40 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     if (length === 0) {
       return new Uint8Array(0)
     }
-    return this.cachedRange(this.url, position, length, {
-      ...(opts.signal ? { signal: opts.signal } : {}),
-      headers: opts.headers,
+    return this.cachedRange(
+      this.url,
+      position,
+      length,
+      this.buildReadRequest(opts),
+    )
+  }
+
+  /**
+   * The request `RemoteFile.buildRequest` would have built for this read.
+   *
+   * Repeated here rather than called, because that method is private to the base
+   * class and the range path does not reach it: `fetchWithDeadline` ends at
+   * `RemoteFile.fetch`, which hands an init straight to the fetch implementation
+   * rather than building one. Left to the per-call options alone, a handle
+   * constructed with an `authorization` header sent **every range request
+   * unauthenticated** — measured — and a constructor `signal` cancelled nothing.
+   *
+   * Same merge order as the base class, and the order is the contract:
+   * `overrides` beats the method/redirect/mode defaults so a caller can set
+   * them, per-call options beat the constructor's, and the signal is applied
+   * last so `opts.signal` beats one supplied through `overrides`.
+   */
+  private buildReadRequest(opts: FilehandleOptions): RequestInit {
+    const signal = opts.signal ?? this.baseOpts.signal
+    return {
+      method: 'GET',
+      redirect: 'follow',
+      mode: 'cors',
+      ...this.baseOpts.overrides,
       ...opts.overrides,
-    })
+      headers: { ...this.baseOpts.headers, ...opts.headers },
+      ...(signal ? { signal } : {}),
+    }
   }
 
   // NOTE: range reads return a fully-assembled in-memory Response, so

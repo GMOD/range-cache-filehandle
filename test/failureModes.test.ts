@@ -694,3 +694,90 @@ describe('the size cache is bounded', () => {
     expect(reads).toEqual([])
   })
 })
+
+describe('the options a handle was constructed with', () => {
+  // read() does not go through RemoteFile.buildRequest, which is where the base
+  // class merges these in. Left to the per-call options alone, every range
+  // request went out unauthenticated and no constructor signal cancelled
+  // anything — with nothing said either way.
+  function capture(seen: RequestInit[]) {
+    return async (_url: unknown, init?: RequestInit) => {
+      seen.push(init ?? {})
+      const { start, end } = requestedRange(init)
+      return new Response(
+        fileData.slice(start, Math.min(end, FILE_SIZE - 1) + 1),
+        {
+          status: 206,
+          headers: {
+            'content-range': `bytes ${start}-${Math.min(end, FILE_SIZE - 1)}/${FILE_SIZE}`,
+          },
+        },
+      )
+    }
+  }
+
+  test('a constructor header reaches a range request', async () => {
+    const seen: RequestInit[] = []
+    const file = new RemoteFileWithRangeCache(nextUrl(), {
+      fetch: capture(seen),
+      headers: { authorization: 'Bearer token' },
+    })
+    await file.read(100, 0)
+    expect(new Headers(seen[0]!.headers).get('authorization')).toBe(
+      'Bearer token',
+    )
+  })
+
+  test('a per-call header wins over the constructor one', async () => {
+    const seen: RequestInit[] = []
+    const file = new RemoteFileWithRangeCache(nextUrl(), {
+      fetch: capture(seen),
+      headers: { authorization: 'Bearer base', 'x-trace': 'kept' },
+    })
+    await file.read(100, 0, { headers: { authorization: 'Bearer call' } })
+    const headers = new Headers(seen[0]!.headers)
+    expect(headers.get('authorization')).toBe('Bearer call')
+    expect(headers.get('x-trace')).toBe('kept')
+  })
+
+  test('constructor overrides reach a range request', async () => {
+    const seen: RequestInit[] = []
+    const file = new RemoteFileWithRangeCache(nextUrl(), {
+      fetch: capture(seen),
+      overrides: { credentials: 'include' },
+    })
+    await file.read(100, 0)
+    expect(seen[0]!.credentials).toBe('include')
+  })
+
+  test('a constructor signal cancels a read', async () => {
+    const seen: RequestInit[] = []
+    const controller = new AbortController()
+    controller.abort(new Error('the track closed'))
+    const file = new RemoteFileWithRangeCache(nextUrl(), {
+      fetch: capture(seen),
+      signal: controller.signal,
+    })
+    await expect(file.read(100, 0)).rejects.toThrow('the track closed')
+    expect(seen).toEqual([])
+  })
+
+  test('a per-call signal beats one supplied through overrides', async () => {
+    // RemoteFile.buildRequest applies the signal last, after `overrides`, so
+    // `opts.signal` wins. This class had the spread the other way round, which
+    // let an overrides-supplied signal cancel a read whose caller had given it a
+    // live one.
+    const seen: RequestInit[] = []
+    const stale = new AbortController()
+    stale.abort(new Error('overrides should not win'))
+    const file = new RemoteFileWithRangeCache(nextUrl(), {
+      fetch: capture(seen),
+    })
+    const live = new AbortController()
+    const bytes = await file.read(100, 0, {
+      signal: live.signal,
+      overrides: { signal: stale.signal },
+    })
+    expect(bytes.length).toBe(100)
+  })
+})
