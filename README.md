@@ -67,11 +67,29 @@ in the process. What each was measured against is in `src/constants.ts` and in
 
 ## Docs
 
+- [docs/api.md](docs/api.md) — every export, and the `recordSize` hook a
+  subclass with its own `stat()` needs
 - [docs/dataflow.md](docs/dataflow.md) — how a read flows, with the diagram
 - [docs/sharing.md](docs/sharing.md) — one request, several readers, and whose
   abort cancels it
-- [docs/tuning.md](docs/tuning.md) — the five constants and what measured them
+- [docs/tuning.md](docs/tuning.md) — the five constants, what measured them, and
+  what changes outside a browser
 - [docs/errors.md](docs/errors.md) — what each failure says and why
+
+## The layer above
+
+This caches bytes. Every parser that reads through it caches what it parsed out
+of them, on its own budget and its own idle timeout, and that cache is the one
+that decides whether a read reaches this layer at all:
+
+- [@gmod/bam](https://github.com/GMOD/bam-js) —
+  [caching.md](https://github.com/GMOD/bam-js/blob/main/docs/caching.md)
+- [@gmod/cram](https://github.com/GMOD/cram-js) —
+  [memory.md](https://github.com/GMOD/cram-js/blob/main/docs/memory.md)
+- [@gmod/tabix](https://github.com/GMOD/tabix-js) —
+  [caching.md](https://github.com/GMOD/tabix-js/blob/main/docs/caching.md)
+- [@gmod/bbi](https://github.com/GMOD/bbi-js) —
+  [concurrency.md](https://github.com/GMOD/bbi-js/blob/main/docs/concurrency.md)
 
 ## Provenance
 

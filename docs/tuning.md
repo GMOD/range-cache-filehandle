@@ -15,6 +15,10 @@ and is the copy to update if a measurement changes.
 | `MAX_CONCURRENT`        | 20            | requests in flight, all files       |
 | `RESPONSE_TIMEOUT_MS`   | 30 s          | wait for a response to _begin_      |
 
+Every one of them was chosen against one workload: a genome browser panning a
+track in a browser tab. [Where this runs](#where-this-runs) is what changes if
+that is not what you are doing.
+
 ## `MAX_CACHE_ENTRIES` looks oversized and is not
 
 Cached chunks own their bytes — `fetchRun` copies rather than views, so no chunk
@@ -37,7 +41,10 @@ shrink it on the strength of a workload that stayed inside the parsed budget.
 ## `CACHE_IDLE_TIMEOUT_MS` is longer than the caches above it, deliberately
 
 `@gmod/bam`, `@gmod/cram` and `@gmod/tabix` all take a `cacheIdleTimeoutMs` and
-all default to three minutes. This layer holds for fifteen.
+all default to three minutes
+([bam-js/docs/caching.md](https://github.com/GMOD/bam-js/blob/main/docs/caching.md),
+[cram-js/docs/memory.md](https://github.com/GMOD/cram-js/blob/main/docs/memory.md)).
+This layer holds for fifteen.
 
 Raw compressed bytes cost roughly an order of magnitude less per unit of genomic
 coverage than the parsed features above them, and they are what stands between a
@@ -87,3 +94,40 @@ The deadline is composed with the caller's signal, never substituted for it —
 replacing it would take cancellation back off the socket, which is the ~6.5 MiB
 per cancelled navigation that reference counting exists to preserve
 ([sharing.md](sharing.md)).
+
+## Where this runs
+
+The cache is module state, so its scope is one module instance: **one per
+realm**, not one per process and not one per filehandle. A page and each of its
+workers get their own, and so does each worker thread in node. The 256 MB bound
+is per instance, so a browser with six worker threads has a ceiling of 1.5 GB
+and no single place that knows it.
+
+That is the shape jbrowse has, and every number above was chosen for it: a
+browser session panning a track, where the same person reads the same region
+again a minute later and 256 MB of a device's memory is a reasonable ask.
+
+Two other shapes are worth thinking about before taking the defaults.
+
+**A long-lived server process** shares one cache across every request it serves,
+keyed by URL. That is a real win when many requests hit the same few files, and
+a pure cost when each request reads a file no other request will touch — the
+chunks sit for fifteen minutes on the chance of a re-read that never comes. If
+your traffic is the second kind, call `clearCache()` when a job finishes, or
+`sweepIdleCache()` on a shorter interval of your own. Neither cancels work in
+flight, so both are safe to call from a request handler.
+
+There is no per-file bound and no per-tenant one. One large file can fill the
+cache and evict every chunk of every other, which in a browser is the point (the
+user is looking at one track) and on a shared server may not be.
+
+**A short script** — read a file once, write something out, exit — wants none of
+this and pays little for it: the chunks it caches are ones it will not read
+again, and the ceiling caps the waste at 256 MB. Both timers are `unref`'d, so
+neither the sweep interval nor a pending response deadline holds the process
+open; a script that finishes exits without calling anything.
+
+**A `LocalFile` under `CachedFilehandle`** is the case to think twice about. See
+[api.md](api.md#new-cachedfilehandleinner-key) — there is no request to coalesce
+there, so the only thing bought is reuse, at 256 KiB resident per touched
+region.
