@@ -434,16 +434,74 @@ function resumeAllWaiters() {
   }
 }
 
-export async function limitConcurrency<T>(key: string, fn: () => Promise<T>) {
+/**
+ * Wait for a slot in `pool`, giving up if `signal` aborts before one frees.
+ *
+ * Without the signal a queued read had no way out at all. The deadline in
+ * {@link withResponseDeadline} does not cover this — it starts once the slot is
+ * claimed and a request goes out — so against the wedged origin
+ * {@link MAX_CONCURRENT} describes, a read behind the twenty stuck requests
+ * waited forever *and ignored its caller's abort*, leaving the promise pending
+ * and everything the reader closed over retained. `constants.ts` says the
+ * caller's `AbortSignal` is the escape hatch; queued, it was not one.
+ *
+ * The waiter is spliced out of the queue rather than left in it as a resolver
+ * that no longer does anything. {@link runNext} claims a slot *before* it
+ * resumes whatever it shifts, so a no-op waiter would take a slot out of the
+ * pool permanently — the same accounting {@link resumeAllWaiters} is careful
+ * about, reached from the other direction.
+ */
+async function waitForSlot(pool: Pool, signal: AbortSignal | undefined) {
+  if (signal?.aborted) {
+    return false
+  }
+  let claimed = false
+  await new Promise<void>(resolve => {
+    const resume = () => {
+      // runNext has already claimed the slot on our behalf
+      claimed = true
+      signal?.removeEventListener('abort', giveUp)
+      resolve()
+    }
+    const giveUp = () => {
+      const index = pool.queue.indexOf(resume)
+      if (index !== -1) {
+        pool.queue.splice(index, 1)
+      }
+      resolve()
+    }
+    pool.queue.push(resume)
+    signal?.addEventListener('abort', giveUp, { once: true })
+  })
+  // Deliberately not `!signal.aborted`. An abort that lands after runNext has
+  // resumed us finds the listener already gone, so the slot is ours and giving
+  // it back is the business of the `finally` below rather than of this call —
+  // reported as claimed, `fn` then declines to use it.
+  return claimed
+}
+
+export async function limitConcurrency<T>(
+  key: string,
+  fn: () => Promise<T>,
+  signal?: AbortSignal,
+) {
   const poolKey = poolKeyFor(key)
   const pool = poolFor(poolKey)
   if (pool.active < MAX_CONCURRENT) {
     pool.active++
-  } else {
-    // runNext claims the slot before resuming us, so nothing to increment here
-    await new Promise<void>(resolve => {
-      pool.queue.push(resolve)
-    })
+  } else if (!(await waitForSlot(pool, signal))) {
+    // Gave up before a slot freed, so nothing below may run: no slot was ever
+    // claimed and the `finally` would hand back one this call never took. The
+    // waiter just removed may also have been the last thing keeping the pool
+    // alive.
+    releasePool(poolKey, pool)
+    // throwIfAborted rather than a reject inside waitForSlot, so the reason
+    // reaches the caller exactly as every other abort in this package does
+    signal?.throwIfAborted()
+    // Unreachable: waitForSlot only declines to claim a slot when `signal`
+    // aborted. Throw rather than assert, so a future refactor that breaks that
+    // fails loudly instead of running the request without a slot.
+    throw new Error(`internal: gave up waiting for a request slot for ${key}`)
   }
   try {
     return await fn()
@@ -559,15 +617,21 @@ function fetchRun(
   // The request runs under the run's own signal, not the opening reader's: it
   // is shared, so it must outlive any one reader giving up. joinRun registers
   // them, starting with the reader that opened it.
-  const data = limitConcurrency(key, () => {
-    // every reader gave up while this was queued, so there is nothing to ask
-    // for. On a pan that is the ordinary case rather than a corner
-    state.controller.signal.throwIfAborted()
-    return doFetch(run.start * CHUNK_SIZE, (run.end + 1) * CHUNK_SIZE - 1, {
-      ...init,
-      signal: state.controller.signal,
-    })
-  })
+  const data = limitConcurrency(
+    key,
+    () => {
+      // every reader gave up while this was queued, so there is nothing to ask
+      // for. On a pan that is the ordinary case rather than a corner
+      state.controller.signal.throwIfAborted()
+      return doFetch(run.start * CHUNK_SIZE, (run.end + 1) * CHUNK_SIZE - 1, {
+        ...init,
+        signal: state.controller.signal,
+      })
+    },
+    // and the same signal takes the run back out of the queue, rather than
+    // leaving it waiting for a slot it no longer wants
+    state.controller.signal,
+  )
   joinRun(state, init?.signal)
   const settle = () => {
     state.settled = true

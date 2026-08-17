@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { withResponseDeadline } from '../src/errors.ts'
 import {
   CachedFilehandle,
+  MAX_CONCURRENT,
   MAX_SIZE_ENTRIES,
   RemoteFileWithRangeCache,
   clearCache,
@@ -390,6 +391,68 @@ describe('concurrency is scoped per origin', () => {
       }),
     ])
     expect(bytes).not.toBe('blocked')
+  })
+
+  test('an abort reaches a read still waiting for a slot', async () => {
+    // the deadline does not cover this: it starts once the slot is claimed, so
+    // behind a wedged origin a queued read waited forever and ignored its
+    // caller entirely
+    const origin = `https://q${urlCounter++}.example.com`
+    const silent = (async () => new Promise<Response>(() => {})) as unknown
+    const wedge = []
+    for (let i = 0; i < MAX_CONCURRENT; i++) {
+      wedge.push(
+        makeFile(`${origin}/wedge-${i}.bin`, silent)
+          .read(10, 0)
+          .catch(() => undefined),
+      )
+    }
+    await Promise.resolve()
+
+    const controller = new AbortController()
+    const queued = makeFile(`${origin}/queued.bin`, silent).read(10, 0, {
+      signal: controller.signal,
+    })
+    controller.abort(new Error('the view navigated away'))
+    await expect(queued).rejects.toThrow('the view navigated away')
+  })
+
+  test('and the slot it was waiting for is not lost with it', async () => {
+    // runNext claims a slot before resuming whatever it shifts, so a waiter
+    // left behind as a no-op would take one out of the pool for good
+    const origin = `https://q${urlCounter++}.example.com`
+    let release: (() => void) | undefined
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const held = (async (url: unknown, init?: RequestInit) => {
+      await gate
+      return goodServer()(url as string, init)
+    }) as unknown
+
+    const first = []
+    for (let i = 0; i < MAX_CONCURRENT; i++) {
+      first.push(makeFile(`${origin}/held-${i}.bin`, held).read(10, 0))
+    }
+    await Promise.resolve()
+
+    const controller = new AbortController()
+    const abandoned = makeFile(`${origin}/abandoned.bin`, held).read(10, 0, {
+      signal: controller.signal,
+    })
+    controller.abort(new Error('gone'))
+    await expect(abandoned).rejects.toThrow('gone')
+
+    release!()
+    await Promise.all(first)
+    // the pool has all its slots back: another full batch runs to completion
+    const second = []
+    for (let i = 0; i < MAX_CONCURRENT; i++) {
+      second.push(
+        makeFile(`${origin}/after-${i}.bin`, goodServer()).read(10, 0),
+      )
+    }
+    expect((await Promise.all(second)).every(b => b.length === 10)).toBe(true)
   })
 
   test('clearCache() does not let the next reads overshoot the cap', async () => {
