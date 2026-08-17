@@ -304,12 +304,15 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     if (typeof url === 'string') {
       const range = parseByteRange(new Headers(init?.headers).get('range'))
       if (range) {
-        const buffer = await this.cachedRange(
-          url,
-          range.start,
-          range.end - range.start + 1,
-          init,
-        )
+        const length = range.end - range.start + 1
+        // The same guard `read` applies, for the same reason one layer down.
+        // `parseByteRange` accepts any pair of digits, and the chunk machinery
+        // walks one iteration, promise and in-flight entry per CHUNK_SIZE of
+        // the length before its first await: measured, `bytes=0-99999999999999`
+        // spent 112 seconds in `planRead` and then took the process out with a
+        // heap OOM rather than ever reaching the network.
+        assertReadArgs(url, length, range.start)
+        const buffer = await this.cachedRange(url, range.start, length, init)
         return new Response(buffer, { status: 206 })
       }
     }

@@ -629,6 +629,20 @@ describe('read arguments that would become a wrong request', () => {
     }).toThrow(/NaN length or position/)
   })
 
+  test('a Range header asking for more than a read may is refused', async () => {
+    // parseByteRange takes any pair of digits, and planRead walks one iteration
+    // and one in-flight entry per CHUNK_SIZE of the length before its first
+    // await: measured, this range spent 112 seconds there and then took the
+    // process out with a heap OOM rather than ever reaching the network
+    const log: { start: number; end: number }[] = []
+    const url = nextUrl()
+    const file = makeFile(url, goodServer(log))
+    await expect(
+      file.fetch(url, { headers: { range: 'bytes=0-99999999999999' } }),
+    ).rejects.toThrow(/more than the .* a Uint8Array can hold/)
+    expect(log).toEqual([])
+  })
+
   test('a negative position never reaches the network', async () => {
     const log: { start: number; end: number }[] = []
     const url = nextUrl()
