@@ -27,8 +27,11 @@ Four methods behave differently from the base class.
 ### `read(length, position, opts?)`
 
 Bytes from the chunk cache, assembling and fetching as
-[dataflow.md](dataflow.md) describes. `opts.signal`, `opts.headers` and
-`opts.overrides` all reach the underlying request.
+[dataflow.md](dataflow.md) describes. `headers`, `overrides` and `signal` all
+reach the underlying request, from the constructor and from `opts` both, merged
+the way `RemoteFile` merges them: `overrides` beats the method/redirect/mode
+defaults, `opts` beats the constructor, and `opts.signal` beats a signal
+supplied through `overrides`.
 
 It does not call `RemoteFile.read`, which would build a range header, call
 `fetch` and unwrap a `Response` — three copies of the range, 69-77% of a warm
@@ -44,6 +47,13 @@ multi-range header, no range at all — goes straight to `RemoteFile.fetch`.
 
 So a caller that builds its own range requests gets the cache for free, and a
 caller that streams a whole file is unaffected.
+
+Two differences from `RemoteFile.fetch` on the cached path. A status the range
+machinery cannot read as the bytes that were asked for **throws** rather than
+coming back as a `Response` to inspect — the status hints in
+[errors.md](errors.md) are what that buys, and the uncached path still returns
+its `Response` for any status. And the synthetic 206 carries the bytes, not the
+headers: no `Content-Range`, no `Content-Length`. Read the size with `stat()`.
 
 ### `stat()`
 

@@ -95,8 +95,31 @@ is on the wire and the browser will not let the page read it. The message names
 the header to add. A caller that can degrade gracefully should wrap `stat()` in
 a `try`/`catch`.
 
+## The one nothing here can check
+
+A range response is checked against its `Content-Range`: the header has to
+describe a real range of a file that size, it has to be the range that was asked
+for, and the body has to be as long as it says and reach either the end asked
+for or the end of the file. A body shorter than the range it claims is what that
+last pair is for — nothing downstream can tell a truncated response from the end
+of the file, since a short chunk _is_ how this package represents EOF.
+
+**A `Content-Encoding` puts the length half of that out of reach.** The bytes on
+the wire are then not the bytes of the range, so their count says nothing, and
+the two length checks are skipped. The header checks still run — a response that
+contradicts itself, or that describes some other range, is rejected however it
+is encoded — but a proxy that truncates an encoded body has nothing left to
+catch it, and a truncated body lands in the cache as a file that ends early.
+
+Worth knowing rather than worth fixing: a server that compresses a byte range is
+already unusual, and the reader has no way to distinguish the honest form (the
+range's own bytes, compressed) from the broken one. If a file reads short from
+one host and not another, compare `Content-Encoding` on the range responses.
+
 ## Not an error, but worth knowing
 
 A `read()` with a `NaN` length or position throws a `TypeError` naming the file,
 rather than becoming a `bytes=NaN-NaN` request. It arrives from a corrupt or
-truncated index, and the message says so.
+truncated index, and the message says so. The same guard covers a negative or
+fractional offset, a length past what a `Uint8Array` can hold, and a `Range`
+header handed to `fetch()` asking for any of those.
