@@ -1,3 +1,18 @@
+## [1.2.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.1.0...v1.2.0) (2026-08-17)
+
+### Bug Fixes
+
+- Carry the constructor's headers, overrides and signal into a read ([3863992](https://github.com/GMOD/range-cache-filehandle/commit/386399211ac9f2fb7069a7f6cad647347310de52))
+- Reject a Content-Range that contradicts itself, however the body is encoded ([f81558f](https://github.com/GMOD/range-cache-filehandle/commit/f81558fd81dde5890bf07b3d4a0d73d3f7e180d7))
+- Let an abort reach a read waiting for a concurrency slot ([eaf3fe4](https://github.com/GMOD/range-cache-filehandle/commit/eaf3fe46734d8b023ae3d4bd01f07a7a27492063))
+- Guard the range a fetch() Range header asks for ([74b7ba8](https://github.com/GMOD/range-cache-filehandle/commit/74b7ba8e7a1a2a6d0c4473203acd47303d63bf2c))
+- Forward a read's options through CachedFilehandle ([39c4e8a](https://github.com/GMOD/range-cache-filehandle/commit/39c4e8ad2bc77a7c3a585ce623dfb2b834001d1a))
+- Hand a short read its own buffer rather than a view of a longer one ([abecf60](https://github.com/GMOD/range-cache-filehandle/commit/abecf60bb821564c421cd1418d53f0a13f69cc43))
+
+### Documentation
+
+- What the URL key does not separate, and what a Content-Encoding hides ([f1a2d13](https://github.com/GMOD/range-cache-filehandle/commit/f1a2d1325b6739150ee112996b0b4b1841588695))
+
 ## [1.1.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.0.2...v1.1.0) (2026-08-17)
 
 ### Bug Fixes
