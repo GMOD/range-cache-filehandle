@@ -239,6 +239,32 @@ describe('CachedFilehandle over an arbitrary filehandle', () => {
     expect(reads[0]?.signal).toBe(true)
   })
 
+  test('everything else the caller passed reaches the inner handle', async () => {
+    // the inner handle may be one for which these mean something — a
+    // RemoteFile, or one of its subclasses — and only the signal is this
+    // wrapper's to replace
+    const seen: FilehandleOptions[] = []
+    const inner = {
+      read: async (
+        length: number,
+        _position: number,
+        opts: FilehandleOptions,
+      ) => {
+        seen.push(opts)
+        return new Uint8Array(length)
+      },
+      readFile: async () => new Uint8Array(0),
+      stat: async () => ({ size: 4096 }),
+      close: async () => {},
+    } as unknown as GenericFilehandle
+    await new CachedFilehandle(inner, 'opts').read(10, 0, {
+      headers: { authorization: 'Bearer token' },
+      overrides: { credentials: 'include' },
+    })
+    expect(seen[0]?.headers).toEqual({ authorization: 'Bearer token' })
+    expect(seen[0]?.overrides).toEqual({ credentials: 'include' })
+  })
+
   test('an already-aborted read never reaches the inner handle', async () => {
     const { inner, reads } = fakeInner()
     const file = new CachedFilehandle(inner, 'aborted')
