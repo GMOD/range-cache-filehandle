@@ -205,6 +205,65 @@ describe('a response that is not the range it claims to be', () => {
     await expect(file.read(100, 0)).resolves.toBeInstanceOf(Uint8Array)
   })
 
+  test('but an encoded body is still checked against the range asked for', async () => {
+    // the length checks have to be skipped here; the offset one does not, and
+    // skipping it along with them made one added header enough to walk a
+    // truncated body past every check and into the cache as an early EOF
+    const encodedWrongRange = async (_url: unknown, init?: RequestInit) => {
+      const { start } = requestedRange(init)
+      return new Response(fileData.slice(start, start + 50), {
+        status: 206,
+        headers: {
+          'content-range': `bytes 0-${CHUNK - 1}/${FILE_SIZE}`,
+          'content-encoding': 'gzip',
+        },
+      })
+    }
+    const url = nextUrl()
+    const file = makeFile(url, encodedWrongRange)
+    await expect(file.read(100, CHUNK * 3)).rejects.toThrow(
+      /does not describe the range that was asked for/,
+    )
+  })
+
+  test('a range that ends past the length it reports is rejected', async () => {
+    // and rejected before recordSizeIfUnknown sees it: the total is what fixes
+    // the size of the file for every handle on the URL
+    const impossible = async (_url: unknown, init?: RequestInit) => {
+      const { start, end } = requestedRange(init)
+      return new Response(
+        fileData.slice(start, Math.min(end, FILE_SIZE - 1) + 1),
+        {
+          status: 206,
+          headers: { 'content-range': `bytes ${start}-${end}/100` },
+        },
+      )
+    }
+    const url = nextUrl()
+    const file = makeFile(url, impossible)
+    await expect(file.read(100, 0)).rejects.toThrow(/contradicts itself/)
+    // nothing was learned from it, so the size is not fixed at 100 and a read
+    // past that offset still reaches the server
+    const recovered = makeFile(url, goodServer())
+    expect((await recovered.read(1000, 200)).length).toBe(1000)
+    expect(await recovered.stat()).toEqual({ size: FILE_SIZE })
+  })
+
+  test('a range that ends before it starts is rejected', async () => {
+    const backwards = async (_url: unknown, init?: RequestInit) => {
+      const { start } = requestedRange(init)
+      return new Response(fileData.slice(start, start + 100), {
+        status: 206,
+        headers: {
+          'content-range': `bytes ${start + 500}-${start}/${FILE_SIZE}`,
+        },
+      })
+    }
+    const url = nextUrl()
+    const file = makeFile(url, backwards)
+    await expect(file.read(100, 0)).rejects.toThrow(/contradicts itself/)
+  })
+
   test('no Content-Range means nothing to check against', async () => {
     const bare = async (_url: unknown, init?: RequestInit) => {
       const { start, end } = requestedRange(init)

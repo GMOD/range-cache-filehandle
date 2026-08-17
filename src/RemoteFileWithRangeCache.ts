@@ -381,22 +381,32 @@ function assertServedTheRange(
  * zero bytes and issued no request — and kept doing so for the whole idle
  * window, for every handle sharing the URL.
  *
- * Three things are checked, and the third is the one that needs the request as
- * well as the response. The body has to start where the request did, it has to
- * be as long as `Content-Range` says, and that range has to reach either the
- * end that was asked for or the end of the file. Without the third, a proxy
- * that caps how much of a range it will serve answers a 6 MB request with an
- * accurate `bytes 0-1048575/8388608` and a matching 1 MB body: honest about
- * itself, silently short against the request, and indistinguishable from EOF by
- * the time it reaches the chunk cache.
+ * Four things are checked, in two groups, and which group a check belongs to is
+ * decided by whether it reads the body.
+ *
+ * The first two read only the header. The range has to describe itself
+ * coherently — ending at or after where it starts, and before the end of the
+ * file it reports — and it has to start where the request did.
+ *
+ * The second two compare the body against that header: it has to be as long as
+ * the range says, and the range has to reach either the end that was asked for
+ * or the end of the file. Without the last, a proxy that caps how much of a
+ * range it will serve answers a 6 MB request with an accurate
+ * `bytes 0-1048575/8388608` and a matching 1 MB body: honest about itself,
+ * silently short against the request, and indistinguishable from EOF by the
+ * time it reaches the chunk cache.
  * @see https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.7 (206)
  * @see https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4 (Content-Range)
  *
  * A range *longer* than the one asked for passes: the extra bytes are sliced
  * off, and a server aligning to its own block size is doing nothing harmful.
  *
- * Skipped when there is no `Content-Range` to check against, and when a
- * `Content-Encoding` means the body on the wire is not the bytes of the range.
+ * Skipped entirely when there is no `Content-Range` to check against. A
+ * `Content-Encoding` skips only the second group, because the body on the wire
+ * is then not the bytes of the range and its length says nothing — but the
+ * header still has to be coherent and still has to be the range that was asked
+ * for, and skipping those along with it let one added header take a truncated
+ * body all the way into the cache as an early EOF.
  */
 function assertBodyMatchesRange(
   res: Response,
@@ -406,17 +416,30 @@ function assertBodyMatchesRange(
   buffer: Uint8Array,
   range: ReturnType<typeof parseContentRange>,
 ) {
-  if (
-    range?.start === undefined ||
-    range.end === undefined ||
-    res.headers.get('content-encoding')
-  ) {
+  if (range?.start === undefined || range.end === undefined) {
     return
+  }
+  // A range that ends before it begins, or at or past the length it reports,
+  // is not a range. Left alone the arithmetic below launders it into a
+  // nonsense message, and `recordSizeIfUnknown` takes the total it carried:
+  // measured, a 206 answering `bytes 0-262143/100` fixed the file at 100 bytes
+  // for every handle on the URL, so a read at offset 200 returned nothing and
+  // stat() reported 100.
+  if (
+    range.end < range.start ||
+    (range.total !== undefined && range.end >= range.total)
+  ) {
+    throw new Error(
+      `${url} answered Content-Range "bytes ${range.start}-${range.end}/${range.total ?? '*'}", which does not describe a range of a file that size (the header contradicts itself, so neither the bytes it labels nor the length it reports can be trusted; a caching proxy in front of the file is the usual cause)`,
+    )
   }
   if (range.start !== start) {
     throw new Error(
       `${url} answered bytes ${range.start}-${range.end} for a request for bytes starting at ${start} (the response does not describe the range that was asked for, so its bytes would land at the wrong offsets; a caching proxy in front of the file is the usual cause)`,
     )
+  }
+  if (res.headers.get('content-encoding')) {
+    return
   }
   const expected = range.end - range.start + 1
   if (buffer.byteLength !== expected) {
