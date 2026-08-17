@@ -1,6 +1,6 @@
 # API
 
-Nine exports: two filehandles, two cache controls, and the five constants.
+Eleven exports: two filehandles, three cache controls, and the six constants.
 
 ## `new RemoteFileWithRangeCache(url, opts?)`
 
@@ -136,6 +136,12 @@ dropped resolver strands its caller with neither a resolve nor a reject — a ha
 rather than a cancellation. To actually stop work, abort the signals you passed
 to it.
 
+It also leaves each origin's in-flight request count alone. Resetting a count of
+work that is genuinely still running is what let the reads after a `clearCache`
+reach 40 concurrent against a cap of 20, so a transfer that has wedged mid-body
+stays wedged across a clear. That is the cost of putting no clock on a transfer;
+a server that never answers at all is still covered by `RESPONSE_TIMEOUT_MS`.
+
 ## `clearCacheFor(key)`
 
 Drop one file's cached chunks and its known size, leaving every other file
@@ -146,7 +152,8 @@ blunt. The key is the same one the file was opened with — the URL for a
 
 Like `clearCache`, it does not cancel work in flight: a read still waiting on a
 request is entitled to the bytes it asked for, and that request cleans up after
-itself.
+itself. What such a request no longer does is repopulate the cache when it lands
+— otherwise clearing a file that had a read in flight put it straight back.
 
 ## Constants
 

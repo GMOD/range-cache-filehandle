@@ -47,7 +47,7 @@ const file = new CachedFilehandle(new LocalFile(path), `file://${path}`)
 - Reference-counts each run's readers, so a shared request is cancelled only
   once all of them abort. A reader passing no signal pins it for everyone.
 - Holds 1000 chunks (256 MB) per worker, swept after 15 minutes idle, 20
-  requests at a time **per file**. `clearCache()` drops everything,
+  requests at a time **per origin**. `clearCache()` drops everything,
   `clearCacheFor(key)` drops one file, `sweepIdleCache()` reclaims early.
 - Clamps reads past EOF once a size is known, from `Content-Range`, a 416, or
   `stat()`.
@@ -64,11 +64,12 @@ and any duration limit would cut off a slow download rather than a broken one â€
 for the same reason. The way to stop a read is the `AbortSignal` you passed it,
 which is carried to the socket.
 
-Requests are capped per file rather than per process so that one unresponsive
+Requests are capped per origin rather than per process so that one unresponsive
 server cannot starve the others â€” the
 [per-endpoint semaphore](https://copdips.com/2023/01/python-aiohttp-rate-limit.html)
 shape, since a global limit "will unnecessarily restrict requests to other
-endpoints as well".
+endpoints as well". Per origin and not per URL, because a presigned URL rotates
+its signature on every read and a pool keyed on that would be new every time.
 
 [docs/dataflow.md](docs/dataflow.md) has the diagram and walks one read through
 all of it.

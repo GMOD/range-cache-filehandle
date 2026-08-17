@@ -78,11 +78,22 @@ not happen — nothing would ever take it out.
 
 ## Concurrency
 
-`limitConcurrency` caps requests at 20 across every file in the process,
-queueing the rest. `stat()` goes through it too: it is a real request against
-the same server, and N readers opening at once used to issue N stats outside the
-cap.
+`limitConcurrency` caps requests at 20 per **origin**, queueing the rest. Held
+globally, the pool was a place one file could take the whole process down: a
+server that answers the headers and then goes silent never settles, so its
+request never gives the slot back, and 20 of those blocked every read of every
+other file. Keyed per origin instead, that dead server stalls only the host it
+lives on — and per origin rather than per URL because a presigned URL rotates
+its signature on every read, which would mint a fresh pool each time and cap
+nothing.
+
+`stat()` goes through it too: it is a real request against the same server, and
+N readers opening at once used to issue N stats outside the cap. `stat()` also
+goes through `oncePerKey`, so those N readers share one request rather than
+making N of them for one number.
 
 `clearCache` resumes queued waiters rather than dropping them. A dropped
 resolver strands its caller with no resolve and no reject — a hang rather than a
-cancellation.
+cancellation. Each resumed waiter is _added_ to the active count, never assigned
+over it: assigning discards the count of work still running, which let the next
+reads reach 40 concurrent against a cap of 20.

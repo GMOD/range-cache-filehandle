@@ -6,5 +6,6 @@ export {
   CHUNK_SIZE,
   MAX_CACHE_ENTRIES,
   MAX_CONCURRENT,
+  MAX_SIZE_ENTRIES,
   RESPONSE_TIMEOUT_MS,
 } from './constants.ts'

@@ -46,6 +46,12 @@ interface RunState {
   /** aborted to take this run's listeners back off its readers' signals */
   dispose: AbortController
   settled: boolean
+  /**
+   * set by a clear that happened while this run was in flight. Its readers
+   * still get their bytes — they asked before the clear and are entitled to
+   * them — but nothing it produces goes back into the cache the clear emptied.
+   */
+  stale: boolean
 }
 
 interface InFlightChunk {
@@ -158,18 +164,46 @@ function putCached(key: string, chunk: Uint8Array) {
 
 /**
  * Whether the file is known to end at or before where this chunk starts.
- *
- * The difference between an EOF marker and an empty answer nobody can explain.
- * An empty chunk is cached as a marker so later reads stop asking for bytes past
- * the end — but cached on the strength of an *unexplained* empty response, that
- * marker is indistinguishable from data loss, and it persists for the whole idle
- * window across every handle sharing the key. Measured: one spurious 416 made a
- * read return zero bytes, and made the *next* read of the same offset return
- * zero bytes without going to the network at all.
  */
 function isKnownPastEof(key: string, chunkIndex: number) {
   const size = sizeCache.get(key)
   return size !== undefined && chunkIndex * CHUNK_SIZE >= size
+}
+
+/**
+ * Whether a chunk the run produced is worth keeping.
+ *
+ * Only an *empty* chunk is ever in question, and the question is whether it is
+ * an EOF marker or an empty answer nobody can explain. Caching it is what stops
+ * later reads asking for bytes past the end; caching one that cannot be
+ * explained is indistinguishable from data loss, and it persists for the whole
+ * idle window across every handle sharing the key. Measured: one spurious 416
+ * made a read return zero bytes, and made the *next* read of the same offset
+ * return zero bytes without going to the network at all.
+ *
+ * What separates them is the rest of the run. A run whose body came back with
+ * data in it reached the end of the file — `assertBodyMatchesRange` has already
+ * rejected a 206 that stops short of both the requested end and EOF — so a
+ * chunk past that data is genuinely past EOF and the marker is real. A run that
+ * came back **wholly** empty is the untrustworthy one: that is the shape of the
+ * unexplained 416, and it is only believed where a known size confirms it.
+ *
+ * The distinction has to be drawn here rather than by size alone, because the
+ * size is exactly what is missing in the case that matters — a cross-origin
+ * server not exposing `Content-Range`. Left to `isKnownPastEof` on its own,
+ * every read past the end of such a file re-requested, permanently: measured at
+ * one wasted round trip per read, and every bgzf reader over-reads its last
+ * block by construction.
+ */
+function isWorthCaching(
+  key: string,
+  chunkIndex: number,
+  chunk: Uint8Array,
+  runBody: Uint8Array,
+) {
+  return (
+    chunk.length > 0 || runBody.length > 0 || isKnownPastEof(key, chunkIndex)
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +268,16 @@ function stopSweep() {
  * Mostly for tests, which need each case to start from an empty cache, and for a
  * consumer that knows it is finished with everything it has opened. To reclaim
  * one file rather than all of them, see {@link clearCacheFor}.
+ *
+ * Deliberately leaves each pool's `active` count alone. Resetting it is the bug
+ * this cache had — assigning over a count of work that is genuinely still
+ * running lets the next reads overshoot the cap, measured at forty concurrent
+ * against a limit of twenty — and dropping the pools outright has the same
+ * effect by another route, since the leaked work then decrements a pool nothing
+ * consults. So a file whose transfer has wedged mid-body stays wedged across a
+ * clear, which is the honest cost of putting no clock on a transfer; see
+ * {@link MAX_CONCURRENT}. It is one file rather than the process, and a server
+ * that never answers at all is still covered by {@link RESPONSE_TIMEOUT_MS}.
  */
 export function clearCache() {
   cache = new Map<string, CacheEntry>()
@@ -243,9 +287,26 @@ export function clearCache() {
   // starts it again with the next chunk
   stopSweep()
   // A leaked fetch that settles after this still removes its own entry from the
-  // new map only if it is still the owner, so dropping the old map is safe.
+  // new map only if it is still the owner, so dropping the old map is safe. It
+  // would still repopulate the cache, though, which is what stale stops.
+  markStale(inFlight.values())
   inFlight = new Map<string, InFlightChunk>()
   resumeAllWaiters()
+}
+
+/**
+ * Take the runs behind `entries` out of the cache's future.
+ *
+ * A clear cannot cancel work in flight — a reader waiting on it asked before
+ * the clear and is entitled to its bytes — but without this the run's
+ * `putCached` lands after the clear and puts the file straight back. Measured:
+ * one read, `clearCacheFor` while it was in flight, and the next read of the
+ * same offset was served from the cache that had just been emptied.
+ */
+function markStale(entries: Iterable<InFlightChunk>) {
+  for (const entry of entries) {
+    entry.run.stale = true
+  }
 }
 
 /**
@@ -255,14 +316,20 @@ export function clearCache() {
  * blunt for. Chunk keys are prefixed with the file key, so this is a scan of the
  * cache — bounded by {@link MAX_CACHE_ENTRIES}, and only on an explicit call.
  *
- * Deliberately does not touch in-flight requests: a read still waiting on one is
- * entitled to its bytes, and its own cleanup removes it.
+ * Deliberately does not *cancel* in-flight requests: a read still waiting on one
+ * is entitled to its bytes, and its own cleanup removes it. What those requests
+ * may no longer do is put the file back in the cache once they land, which is
+ * what marking their runs stale prevents.
  */
 export function clearCacheFor(key: string) {
-  const prefix = `${key}:`
   for (const chunkKey of cache.keys()) {
-    if (chunkKey.startsWith(prefix)) {
+    if (isChunkOf(chunkKey, key)) {
       cache.delete(chunkKey)
+    }
+  }
+  for (const [chunkKey, entry] of inFlight) {
+    if (isChunkOf(chunkKey, key)) {
+      entry.run.stale = true
     }
   }
   sizeCache.delete(key)
@@ -271,9 +338,51 @@ export function clearCacheFor(key: string) {
   }
 }
 
+/**
+ * Whether `chunkKey` is one of `key`'s chunks.
+ *
+ * The suffix has to be checked, not just the prefix. Keys with colons in them
+ * are ordinary — a `host:port` URL, an S3 object name carrying a timestamp, a
+ * `blob:` key — and `startsWith(`${key}:`)` alone also matches every chunk of
+ * any key that merely *begins* with this one: measured, `clearCacheFor` on
+ * `https://h/a` evicted the chunks of `https://h/a:2024` too.
+ */
+function isChunkOf(chunkKey: string, key: string) {
+  return (
+    chunkKey.startsWith(`${key}:`) &&
+    /^\d+$/.test(chunkKey.slice(key.length + 1))
+  )
+}
+
 // ---------------------------------------------------------------------------
 // concurrency, per key
 // ---------------------------------------------------------------------------
+
+/**
+ * The endpoint a key's requests are polite to, which is what the limit is about.
+ *
+ * Not the key itself. A presigned S3 or GCS URL carries an expiring signature in
+ * the query string, so a session re-signing its URLs mints a new key on every
+ * read — the same rotation {@link MAX_SIZE_ENTRIES} exists for — and keyed on
+ * that, the pool is fresh every time and caps nothing. Collapsing to the origin
+ * also puts a real ceiling back on the process, which per-URL scoping had
+ * removed: a browser session talks to a handful of origins, not a handful per
+ * file.
+ *
+ * Only for http(s). A `file://` URL has an origin of `"null"`, so every local
+ * file in the process would share one pool of twenty for no reason — there is no
+ * server to be polite to.
+ */
+function poolKeyFor(key: string) {
+  try {
+    const url = new URL(key)
+    return url.protocol === 'http:' || url.protocol === 'https:'
+      ? url.origin
+      : key
+  } catch {
+    return key
+  }
+}
 
 function poolFor(key: string) {
   let pool = pools.get(key)
@@ -326,7 +435,8 @@ function resumeAllWaiters() {
 }
 
 export async function limitConcurrency<T>(key: string, fn: () => Promise<T>) {
-  const pool = poolFor(key)
+  const poolKey = poolKeyFor(key)
+  const pool = poolFor(poolKey)
   if (pool.active < MAX_CONCURRENT) {
     pool.active++
   } else {
@@ -339,7 +449,7 @@ export async function limitConcurrency<T>(key: string, fn: () => Promise<T>) {
     return await fn()
   } finally {
     pool.active--
-    runNext(key, pool)
+    runNext(poolKey, pool)
   }
 }
 
@@ -401,8 +511,20 @@ export function hasSize(key: string) {
   return sizeCache.has(key)
 }
 
+/**
+ * Re-inserts on the way out, so the map is ordered by *use* rather than by first
+ * write. Without that, `putSize` evicts the entry a session reads all day — it
+ * was written first, so it goes first — while the five thousand rotating
+ * presigned URLs that pushed it out are all newer and all stay. Losing it loses
+ * the EOF clamp `getCachedRange` depends on.
+ */
 export function getSize(key: string) {
-  return sizeCache.get(key)
+  const size = sizeCache.get(key)
+  if (size !== undefined) {
+    sizeCache.delete(key)
+    sizeCache.set(key, size)
+  }
+  return size
 }
 
 /**
@@ -432,6 +554,7 @@ function fetchRun(
     controller: new AbortController(),
     dispose: new AbortController(),
     settled: false,
+    stale: false,
   }
   // The request runs under the run's own signal, not the opening reader's: it
   // is shared, so it must outlive any one reader giving up. joinRun registers
@@ -483,7 +606,7 @@ function publishChunk(
   // free nothing and MAX_CACHE_ENTRIES would bound nothing.
   const chunk = data.then(buffer => {
     const copy = buffer.slice(offset, offset + CHUNK_SIZE)
-    if (copy.length > 0 || isKnownPastEof(key, index)) {
+    if (!state.stale && isWorthCaching(key, index, copy, buffer)) {
       putCached(chunkKey, copy)
     }
     return copy
@@ -725,7 +848,7 @@ export async function getCachedRange(
   // guarantee they read the complete final bgzf block, so their last read of
   // a file routinely extends past EOF; unclamped, that tail asks for chunks
   // starting past EOF and the server answers 416.
-  const size = sizeCache.get(key)
+  const size = getSize(key)
   const end =
     size === undefined ? start + length : Math.min(start + length, size)
   const startChunk = Math.floor(start / CHUNK_SIZE)

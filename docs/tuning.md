@@ -1,18 +1,20 @@
 # The constants, and what measured them
 
-Five constants are exported for reading, not setting: `CHUNK_SIZE`,
-`MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT` and
-`RESPONSE_TIMEOUT_MS`. There is no per-instance override, because the cache is
-module-global — a knob on one filehandle would set policy for every other one in
-the process. `src/constants.ts` carries the same reasoning next to the values,
-and is the copy to update if a measurement changes.
+Six constants are exported for reading, not setting: `CHUNK_SIZE`,
+`MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT`,
+`MAX_SIZE_ENTRIES` and `RESPONSE_TIMEOUT_MS`. There is no per-instance override,
+because the cache is module-global — a knob on one filehandle would set policy
+for every other one in the process. `src/constants.ts` carries the same
+reasoning next to the values, and is the copy to update if a measurement
+changes.
 
 | constant                | value         | bounds                              |
 | ----------------------- | ------------- | ----------------------------------- |
 | `CHUNK_SIZE`            | 256 KiB       | the grid a read snaps to            |
 | `MAX_CACHE_ENTRIES`     | 1000 (256 MB) | retained bytes, per module instance |
 | `CACHE_IDLE_TIMEOUT_MS` | 15 min        | how long an unread chunk survives   |
-| `MAX_CONCURRENT`        | 20            | requests in flight, **per file**    |
+| `MAX_CONCURRENT`        | 20            | requests in flight, **per origin**  |
+| `MAX_SIZE_ENTRIES`      | 5000          | file sizes remembered               |
 | `RESPONSE_TIMEOUT_MS`   | 30 s          | wait for a response to _begin_      |
 
 Every one of them was chosen against one workload: a genome browser panning a

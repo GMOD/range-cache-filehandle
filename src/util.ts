@@ -24,15 +24,37 @@ export function unrefIfPossible(timer: unknown) {
  *
  * `total` is undefined for the `bytes 0-255/*` form, in which the server
  * declines to say how long the file is, and `start`/`end` are undefined for the
- * `bytes * /12345` form a 416 carries. Anything unparseable yields undefined,
- * and the caller treats the response as unvalidatable rather than as wrong.
+ * `bytes * /12345` form a 416 carries.
+ *
+ * Two passes, because validating the range and learning the size want opposite
+ * things from a header that does not conform. The strict pass is what
+ * `start`/`end` come from: a response is only checked against a `Content-Range`
+ * we fully understand, and anything else is left unvalidated rather than called
+ * wrong. The size, though, is worth recovering from a header that is merely
+ * malformed — `bytes=0-255/12345` with an `=` for the space is a real server
+ * bug, and `Headers.get` joins a duplicated header into
+ * `bytes 0-255/12345, bytes 0-255/12345` — so the loose pass takes a trailing
+ * `/<digits>` and reports only the total. Without it those responses lose the
+ * size, and `stat()` reports the loss as a CORS misconfiguration, which sends
+ * the reader to a header that arrived and was simply not parsed.
  */
 export function parseContentRange(header: string | null) {
-  const match = header
-    ? /^bytes (?:(\d+)-(\d+)|\*)\/(?:(\d+)|\*)$/.exec(header.trim())
-    : null
-  if (!match) {
+  if (!header) {
     return undefined
+  }
+  const trimmed = header.trim()
+  const match = /^bytes (?:(\d+)-(\d+)|\*)\/(?:(\d+)|\*)$/.exec(trimmed)
+  if (!match) {
+    // still anchored on the range unit: `items 0-255/12345` counts something
+    // that is not bytes, so its total is not a byte length
+    const loose = /^bytes\b.*\/(\d+)\s*$/i.exec(trimmed)
+    return loose
+      ? {
+          start: undefined,
+          end: undefined,
+          total: Number.parseInt(loose[1]!, 10),
+        }
+      : undefined
   }
   const [, start, end, total] = match
   return {
@@ -40,6 +62,19 @@ export function parseContentRange(header: string | null) {
     end: end === undefined ? undefined : Number.parseInt(end, 10),
     total: total === undefined ? undefined : Number.parseInt(total, 10),
   }
+}
+
+/**
+ * Let go of a body nobody is going to read.
+ *
+ * The 416 and the error statuses both leave `readRange` without reaching
+ * `arrayBuffer()`. Under node a `Response` whose body is neither read nor
+ * cancelled holds its connection out of undici's pool until GC, so a run of
+ * 416s or 5xxs — exactly when a reader is retrying hard — exhausts the agent.
+ */
+export function discardBody(res: Response) {
+  // the body is being dropped either way, so a failure to cancel says nothing
+  res.body?.cancel().catch(() => undefined)
 }
 
 /**
@@ -74,6 +109,12 @@ export function parseByteRange(range: string | null) {
  * floored during assembly, so the read silently returns the bytes next to the
  * ones asked for. Both come from the same place a NaN does, an index that is
  * corrupt or being parsed against the wrong file.
+ *
+ * The magnitude of `length` matters as well as its sign. `planRead` walks one
+ * iteration, promise and in-flight entry per {@link CHUNK_SIZE} of it, all
+ * before the first await, so a corrupt length hangs the thread long before
+ * `new Uint8Array` would have refused it — hence the ceiling at what a
+ * `Uint8Array` can hold rather than at `Number.MAX_SAFE_INTEGER`.
  */
 export function assertReadArgs(key: string, length: number, position: number) {
   if (Number.isNaN(length) || Number.isNaN(position)) {
@@ -91,7 +132,15 @@ export function assertReadArgs(key: string, length: number, position: number) {
       `read() of ${key} needs a non-negative safe-integer length and position (length=${length}, position=${position}); the index the offset came from is probably corrupt or being read against the wrong file`,
     )
   }
+  if (length > MAX_READ_LENGTH) {
+    throw new TypeError(
+      `read() of ${key} asked for ${length} bytes, more than the ${MAX_READ_LENGTH} a Uint8Array can hold; the index the offset came from is probably corrupt or being read against the wrong file`,
+    )
+  }
 }
+
+/** what a `Uint8Array` can hold, and so the largest read worth attempting */
+const MAX_READ_LENGTH = 2 ** 32 - 1
 
 /**
  * Copy the part of `chunk` — the CHUNK_SIZE-aligned block at `chunkIndex` —

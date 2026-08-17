@@ -39,10 +39,10 @@ export class CachedFilehandle implements GenericFilehandle {
     position: number,
     opts: FilehandleOptions = {},
   ): Promise<Uint8Array<ArrayBuffer>> {
+    assertReadArgs(this.key, length, position)
     if (length === 0) {
       return new Uint8Array(0)
     }
-    assertReadArgs(this.key, length, position)
     return getCachedRange(
       this.key,
       position,

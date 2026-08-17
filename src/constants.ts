@@ -48,26 +48,29 @@ export const CACHE_IDLE_TIMEOUT_MS = 15 * 60 * 1000
 export const SWEEP_INTERVAL_MS = CACHE_IDLE_TIMEOUT_MS / 4
 
 /**
- * Requests in flight at once **per file**, not per process.
+ * Requests in flight at once **per origin**, not per process.
  *
- * Scoped per key deliberately. Held globally, the pool was a place one file
- * could take the whole process down: a server that answers the headers and then
- * goes silent mid-body never settles, so its request never gives the slot back,
- * and twenty such requests — the cap exactly — blocked every read of every
- * other file indefinitely. Measured, and permanent, since nothing here times a
- * transfer out and nothing should: this layer coalesces a contiguous run into
- * one request, and a large one is the normal case rather than the pathological
- * one.
+ * Held globally, the pool was a place one file could take the whole process
+ * down: a server that answers the headers and then goes silent mid-body never
+ * settles, so its request never gives the slot back, and twenty such requests —
+ * the cap exactly — blocked every read of every other file indefinitely.
+ * Measured, and permanent, since nothing here times a transfer out and nothing
+ * should: this layer coalesces a contiguous run into one request, and a large
+ * one is the normal case rather than the pathological one.
  *
- * Per key, that same dead server stalls only the file it serves. The change is
- * in the permissive direction — twenty files may now have twenty requests each,
- * where before they shared twenty — which is the right way round, because the
- * limit exists to be polite to one server rather than to ration the process.
- *
+ * Scoped per origin, that same dead server stalls only the host it lives on.
  * This is the standard shape rather than a local invention: a global limit
  * "will unnecessarily restrict requests to other endpoints as well", so the
  * advice is a semaphore per endpoint.
  * @see https://copdips.com/2023/01/python-aiohttp-rate-limit.html
+ *
+ * Per origin rather than per file, which is where this landed first and which
+ * turned out to cap neither. A presigned S3 or GCS URL rotates its signature on
+ * every read — the rotation {@link MAX_SIZE_ENTRIES} exists for — so a per-URL
+ * pool is fresh each time and limits nothing; and with no key in common between
+ * two files, the process-wide ceiling disappeared along with the head-of-line
+ * blocking, leaving twenty requests times however many files are open. The
+ * origin is both what a server experiences as load and a small, bounded set.
  *
  * Note what it does *not* fix, deliberately. A read of the stalled file still
  * waits forever, because nothing here puts a clock on a transfer and nothing

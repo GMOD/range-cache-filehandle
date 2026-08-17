@@ -66,6 +66,12 @@ export function withResponseDeadline(
   const composed = new AbortController()
   const onCallerAbort = () => {
     composed.abort(signal?.reason)
+    // Stand the deadline down with it. Once the caller has given up there is
+    // nothing left for it to diagnose, and a `fetch` that does not honour the
+    // signal reaches neither `responded` nor `dispose` — so the timer fires
+    // half a minute later, writes `expired`, and `describeFetchFailure` prefers
+    // it, reporting a cancelled request as a server that never answered.
+    deadline.dispose()
   }
   const deadline: ResponseDeadline = {
     signal: composed.signal,

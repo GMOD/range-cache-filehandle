@@ -16,7 +16,12 @@ import {
   statusHint,
   withResponseDeadline,
 } from './errors.ts'
-import { assertReadArgs, parseByteRange, parseContentRange } from './util.ts'
+import {
+  assertReadArgs,
+  discardBody,
+  parseByteRange,
+  parseContentRange,
+} from './util.ts'
 
 import type { FilehandleOptions } from 'generic-filehandle2'
 
@@ -120,6 +125,7 @@ export class RemoteFileWithRangeCache extends RemoteFile {
         url,
         parseContentRange(res.headers.get('content-range'))?.total,
       )
+      discardBody(res)
       return new Uint8Array(0)
     }
     assertServedTheRange(res, url, start, end)
@@ -131,8 +137,13 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       recordSizeIfUnknown(url, buffer.byteLength)
     } else {
       const range = parseContentRange(res.headers.get('content-range'))
+      // Validate before recording. A response this rejects has still told us a
+      // `total`, and recordSizeIfUnknown never overwrites, so recording first
+      // lets a proxy with a wrong Content-Range fix the size of the file at
+      // whatever it claimed — every later read clamped to it and stat()
+      // answering with it, for the life of the process.
+      assertBodyMatchesRange(res, url, start, end, buffer, range)
       recordSizeIfUnknown(url, range?.total)
-      assertBodyMatchesRange(res, url, start, buffer, range)
     }
     return buffer
   }
@@ -212,11 +223,13 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     position: number,
     opts: FilehandleOptions = {},
   ): Promise<Uint8Array<ArrayBuffer>> {
-    // mirrors RemoteFile.read's guards, which we no longer go through
+    // mirrors RemoteFile.read's guards, which we no longer go through. Ahead of
+    // the zero-length short-circuit, or `read(0, -1)` is accepted quietly while
+    // `read(1, -1)` throws
+    assertReadArgs(this.url, length, position)
     if (length === 0) {
       return new Uint8Array(0)
     }
-    assertReadArgs(this.url, length, position)
     return this.cachedRange(this.url, position, length, {
       ...(opts.signal ? { signal: opts.signal } : {}),
       headers: opts.headers,
@@ -304,6 +317,7 @@ function assertServedTheRange(
 ) {
   if (!res.ok || (res.status !== 206 && start !== 0)) {
     const msg = `HTTP ${res.status} fetching ${url} bytes ${start}-${end}${statusHint(res.status)}`
+    discardBody(res)
     throw Object.assign(new Error(msg), { status: res.status })
   }
 }
@@ -319,12 +333,19 @@ function assertServedTheRange(
  * zero bytes and issued no request — and kept doing so for the whole idle
  * window, for every handle sharing the URL.
  *
- * So the two things the server told us are checked against what it sent: the
- * offset the body starts at, and how long it is. A single-part 206 carries
- * exactly one range and describes it in `Content-Range`, so those two agreeing
- * is the guarantee the format offers.
+ * Three things are checked, and the third is the one that needs the request as
+ * well as the response. The body has to start where the request did, it has to
+ * be as long as `Content-Range` says, and that range has to reach either the
+ * end that was asked for or the end of the file. Without the third, a proxy
+ * that caps how much of a range it will serve answers a 6 MB request with an
+ * accurate `bytes 0-1048575/8388608` and a matching 1 MB body: honest about
+ * itself, silently short against the request, and indistinguishable from EOF by
+ * the time it reaches the chunk cache.
  * @see https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.7 (206)
  * @see https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4 (Content-Range)
+ *
+ * A range *longer* than the one asked for passes: the extra bytes are sliced
+ * off, and a server aligning to its own block size is doing nothing harmful.
  *
  * Skipped when there is no `Content-Range` to check against, and when a
  * `Content-Encoding` means the body on the wire is not the bytes of the range.
@@ -333,6 +354,7 @@ function assertBodyMatchesRange(
   res: Response,
   url: string,
   start: number,
+  end: number,
   buffer: Uint8Array,
   range: ReturnType<typeof parseContentRange>,
 ) {
@@ -352,6 +374,13 @@ function assertBodyMatchesRange(
   if (buffer.byteLength !== expected) {
     throw new Error(
       `${url} sent ${buffer.byteLength} bytes for bytes ${range.start}-${range.end}, which is ${expected} bytes (the body is truncated; left alone this is indistinguishable from the file ending here and would be cached as such)`,
+    )
+  }
+  // only against a known total: with `bytes 0-255/*` there is no EOF to compare
+  // a short range against, so there is nothing here to be sure about
+  if (range.total !== undefined && range.end < Math.min(end, range.total - 1)) {
+    throw new Error(
+      `${url} served bytes ${range.start}-${range.end} of a request for bytes ${start}-${end} of a ${range.total}-byte file (the response stops short of both the end asked for and the end of the file, so the bytes past it would be cached as EOF; a proxy capping how much of a range it will serve is the usual cause)`,
     )
   }
 }
