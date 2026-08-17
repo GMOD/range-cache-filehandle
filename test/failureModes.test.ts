@@ -831,6 +831,27 @@ describe('the size cache is bounded', () => {
   })
 })
 
+describe('the bytes a read hands back', () => {
+  test('a short read owns its buffer rather than viewing a longer one', async () => {
+    // a view would carry the whole requested length behind it, so transferring
+    // `.buffer` — which every worker pool over these bytes does — would move
+    // bytes past the end of the read
+    const url = nextUrl()
+    const file = makeFile(url, goodServer())
+    const bytes = await file.read(1000, FILE_SIZE - 100)
+    expect(bytes.length).toBe(100)
+    expect(bytes.buffer.byteLength).toBe(100)
+  })
+
+  test('a full read is handed back without a copy', async () => {
+    const url = nextUrl()
+    const file = makeFile(url, goodServer())
+    const bytes = await file.read(1000, 0)
+    expect(bytes.length).toBe(1000)
+    expect(bytes.buffer.byteLength).toBe(1000)
+  })
+})
+
 describe('the options a handle was constructed with', () => {
   // read() does not go through RemoteFile.buildRequest, which is where the base
   // class merges these in. Left to the per-call options alone, every range

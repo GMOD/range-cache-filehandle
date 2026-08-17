@@ -891,7 +891,13 @@ function assembleRange(
     }
   }
   // max(0) because a read wholly past EOF has dataEnd < start
-  return result.subarray(0, Math.max(0, dataEnd - start))
+  const length = Math.max(0, dataEnd - start)
+  // `slice`, not `subarray`, once the read has come back short. A view would
+  // hand the caller a Uint8Array whose buffer is longer than its contents, so
+  // `postMessage` of it — or a transfer of its `.buffer`, which every worker
+  // pool over these bytes does — moves or detaches bytes that are not the
+  // read's. The copy only happens where the file ended inside the range.
+  return length === result.length ? result : result.slice(0, length)
 }
 
 export async function getCachedRange(
