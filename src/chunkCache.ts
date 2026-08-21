@@ -540,10 +540,23 @@ export function oncePerKey<T>(key: string, fn: () => Promise<T>) {
 // file sizes
 // ---------------------------------------------------------------------------
 
+/**
+ * The one door into the size cache, and so where finiteness is checked.
+ *
+ * A non-finite size does not fail, it *poisons*: `Math.min(start + length, NaN)`
+ * is NaN, so `getCachedRange`'s chunk loop never runs and every later read of
+ * that file returns empty with nothing said. A metadata endpoint that populates
+ * `size` only for files that have one — not for folders, shortcuts or native
+ * editor documents — makes `Number(undefined)` a reachable input rather than a
+ * hypothetical, so the guard belongs here rather than at whichever caller was
+ * thought of first.
+ */
 function putSize(key: string, size: number) {
-  sizeCache.delete(key)
-  evictOldest(sizeCache, MAX_SIZE_ENTRIES)
-  sizeCache.set(key, size)
+  if (Number.isFinite(size)) {
+    sizeCache.delete(key)
+    evictOldest(sizeCache, MAX_SIZE_ENTRIES)
+    sizeCache.set(key, size)
+  }
 }
 
 /**
@@ -551,18 +564,9 @@ function putSize(key: string, size: number) {
  * `stat` the underlying source answers directly, or one a subclass gets from a
  * metadata endpoint. Authoritative, so unlike the Content-Range observation
  * below it overwrites what is already there.
- *
- * Guarded on finiteness because a non-finite size does not fail, it *poisons*:
- * `Math.min(start + length, NaN)` is NaN, so `getCachedRange`'s chunk loop never
- * runs and every later read of that file returns empty with nothing said. A
- * metadata endpoint that populates `size` only for files that have one — not for
- * folders, shortcuts or native editor documents — makes `Number(undefined)` a
- * reachable input rather than a hypothetical.
  */
 export function recordSize(key: string, size: number) {
-  if (Number.isFinite(size)) {
-    putSize(key, size)
-  }
+  putSize(key, size)
 }
 
 export function hasSize(key: string) {
@@ -921,6 +925,15 @@ export async function getCachedRange(
   const size = getSize(key)
   const end =
     size === undefined ? start + length : Math.min(start + length, size)
+  // Every byte asked for is past the end of the file, so there is nothing to
+  // assemble and nothing to ask for. Returning here rather than letting the
+  // chunk arithmetic reach the same empty answer: clamping moves `end` and
+  // leaves `start` where it was, so a `start` past a size that does not fall on
+  // a chunk boundary still shares a chunk with `end - 1`, and the plan below
+  // fetches that chunk to copy none of it.
+  if (start >= end) {
+    return new Uint8Array(0)
+  }
   const startChunk = Math.floor(start / CHUNK_SIZE)
   const lastChunk = Math.floor((end - 1) / CHUNK_SIZE)
 

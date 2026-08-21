@@ -19,7 +19,20 @@ to do about it.
   every chunk past the first would be filled with data from the wrong position —
   silently, surfacing much later as something like `invalid bgzf header`. It is
   tolerated only when the request started at 0, where the body genuinely covers
-  the requested bytes.
+  the requested bytes, **and only when it is no longer than the range that was
+  asked for**. That second half is about memory rather than offsets: reading a
+  body allocates all of it, so a `stat()` of a 100 GB BAM on a server with no
+  range support used to allocate 100 GB to learn one number, and every 256 KiB
+  read allocated it again. Now the declared length is checked before the body is
+  touched, and a server sending more than was asked for gets this message
+  instead of the process dying of memory. A file that really is shorter than the
+  request still passes, since the whole of it _is_ the range.
+
+  The check needs the response to declare a length of its own bytes. A chunked
+  200 declares none, and a `Content-Encoding` makes `Content-Length` the
+  compressed count — the same distinction the `Content-Range` checks below draw
+  — so both fall through to reading the body as before.
+
 - **401 / 403** — the file is there and the request was refused. A signed URL
   may have expired, or a bucket policy may not grant read to the page origin.
 - **404** — check the URL, and that the index sits where the reader expects it

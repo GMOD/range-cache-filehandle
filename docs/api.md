@@ -36,7 +36,9 @@ supplied through `overrides`.
 It does not call `RemoteFile.read`, which would build a range header, call
 `fetch` and unwrap a `Response` — three copies of the range, 69-77% of a warm
 read. A subclass overriding `RemoteFile.read` will find it is no longer on the
-path; override this or `fetch` instead.
+path, and so will one overriding `RemoteFile.fetchBytes`, which the base library
+documents as the seam for serving bytes another way — this class is already that
+override. Override this or `fetch` instead.
 
 ### `fetch(url, init?)`
 
@@ -60,6 +62,13 @@ headers: no `Content-Range`, no `Content-Length`. Read the size with `stat()`.
 `{ size }`, from the size cache when a range request has already observed
 `Content-Range`, and otherwise from one zero-length range request issued for the
 purpose.
+
+That probe is the smallest range there is, so a server with no range support
+answers it with the entire file. Its `Content-Length` is the size, which is all
+the probe wanted, so `stat()` takes it from the header and never reads the body
+— the probe's own failure is swallowed in exactly that case, and in no other. A
+404, a network failure, or a body that arrives declaring no length at all still
+reaches you as itself rather than as the missing-`Content-Range` message below.
 
 **It throws rather than reporting `size: 0`** when the server answered but the
 header was not readable — the CORS misconfiguration that is invisible in the

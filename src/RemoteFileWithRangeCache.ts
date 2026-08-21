@@ -18,6 +18,7 @@ import {
 } from './errors.ts'
 import {
   assertReadArgs,
+  declaredLength,
   discardBody,
   parseByteRange,
   parseContentRange,
@@ -78,7 +79,7 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       // and through oncePerKey, so those N readers share one request rather
       // than making N of them for one number.
       await oncePerKey(this.url, () =>
-        limitConcurrency(this.url, () => this.fetchRange(this.url, 0, 0)),
+        limitConcurrency(this.url, () => this.probeSize()),
       )
     }
     const size = getSize(this.url)
@@ -96,6 +97,27 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       )
     } else {
       return { size }
+    }
+  }
+
+  /**
+   * One request for the size and nothing else.
+   *
+   * The smallest range there is, so a server that honours it answers with one
+   * byte and a `Content-Range` carrying the length. A server that does not
+   * honour it fails the read — see {@link assertRangeWasHonored} — having first
+   * recorded the size its `Content-Length` declared, which is everything this
+   * probe wanted. That case alone is swallowed; a 404, a network failure or a
+   * body that arrives without declaring a length still reaches the caller,
+   * rather than being flattened into the Content-Range message below.
+   */
+  private async probeSize() {
+    try {
+      await this.fetchRange(this.url, 0, 0)
+    } catch (e) {
+      if (!hasSize(this.url)) {
+        throw e
+      }
     }
   }
 
@@ -148,6 +170,7 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       return new Uint8Array(0)
     }
     assertServedTheRange(res, url, start, end)
+    assertRangeWasHonored(res, url, start, end)
     const buffer = new Uint8Array(await res.arrayBuffer())
     // The first successful range fetch populates the size cache, so a later
     // stat() needs no HEAD of its own.
@@ -370,6 +393,51 @@ function assertServedTheRange(
     const msg = `HTTP ${res.status} fetching ${url} bytes ${start}-${end}${statusHint(res.status)}`
     discardBody(res)
     throw Object.assign(new Error(msg), { status: res.status })
+  }
+}
+
+/**
+ * Reject a 200 that is about to hand back more bytes than were asked for.
+ *
+ * A 200 to a range request means the server ignored the Range header, and
+ * {@link assertServedTheRange} already refuses that anywhere but at offset 0,
+ * where the body does at least begin with the bytes that were wanted. What it
+ * cannot refuse is the *size* of what is coming, and that is the half that
+ * hurts: `res.arrayBuffer()` allocates the whole body, so `stat()` of a 100 GB
+ * BAM on a server with no range support allocates 100 GB to read one number,
+ * and every 256 KiB read of it allocates 100 GB again. Both die of memory or
+ * hang, with nothing said — on the one misconfiguration this package can name
+ * exactly, and already has a hint written for.
+ *
+ * So the declared length is checked before the body is touched, and the size it
+ * declared is kept on the way out: the request is failing, but a body that is
+ * the whole file has still told us how long the file is, which is all
+ * {@link probeSize} wanted.
+ *
+ * A body no longer than the range asked for passes. That is the honest case the
+ * offset-0 tolerance exists for — the file really is shorter than the request,
+ * so the whole of it *is* the range — and it stays working.
+ *
+ * Only checkable where the response declares a length of its own bytes. A
+ * chunked or content-encoded 200 falls through to reading the body, since there
+ * is nothing to compare against until it has all arrived.
+ */
+function assertRangeWasHonored(
+  res: Response,
+  url: string,
+  start: number,
+  end: number,
+) {
+  const declared = res.status === 200 ? declaredLength(res) : undefined
+  if (declared !== undefined && declared > end - start + 1) {
+    recordSizeIfUnknown(url, declared)
+    discardBody(res)
+    throw Object.assign(
+      new Error(
+        `HTTP 200 fetching ${url} bytes ${start}-${end}${statusHint(200)}`,
+      ),
+      { status: 200 },
+    )
   }
 }
 

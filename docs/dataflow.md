@@ -32,6 +32,13 @@ a cache hit serving bytes some earlier instance fetched would otherwise leave a
 new instance with nothing to clamp against. `CachedFilehandle.stat()` records
 the size it gets from the local file or Blob for the same reason.
 
+A read that begins at or past the end has nothing left after the cut, and
+returns empty without planning anything. Worth doing explicitly rather than
+leaving to the arithmetic: the clamp moves the end and leaves the start where it
+was, so a start past a size that does not land on a chunk boundary still shares
+the file's last chunk with the clamped end, and planning would fetch that chunk
+to copy none of it.
+
 When no size is known at all — a cross-origin server that does not expose
 `Content-Range` — a second mechanism covers the same case: a cached chunk
 shorter than 256 KiB is where the file ended, so planning stops there.

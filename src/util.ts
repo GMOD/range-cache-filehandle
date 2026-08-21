@@ -78,6 +78,28 @@ export function discardBody(res: Response) {
 }
 
 /**
+ * How long a response says its body is, where that is a count of the bytes it
+ * is about to hand back.
+ *
+ * `Content-Length` counts what is on the wire, so a `Content-Encoding` makes it
+ * the compressed length and it says nothing about how much a caller is about to
+ * hold — the same distinction `assertBodyMatchesRange` draws. Undefined for a
+ * chunked response, which does not declare a length at all, so nothing may
+ * depend on this being there.
+ */
+export function declaredLength(res: Response) {
+  const header = res.headers.get('content-encoding')
+    ? null
+    : res.headers.get('content-length')
+  // `Number`, not `parseInt`: `parseInt('12abc')` is 12, and a length that is
+  // only partly a number is not one to allocate against. The empty string has
+  // to be turned away first, though — `Number('')` is 0, so a malformed
+  // `Content-Length:` with nothing after it would declare a body of no bytes.
+  const length = header?.trim() ? Number(header) : Number.NaN
+  return Number.isSafeInteger(length) && length >= 0 ? length : undefined
+}
+
+/**
  * Parse a `bytes=start-end` header into inclusive absolute offsets. Anything
  * else — an open-ended `bytes=100-`, a multi-range `bytes=0-9,20-29`, a
  * backwards range — yields undefined, and the caller passes the request

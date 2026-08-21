@@ -9,7 +9,11 @@ import {
   clearCache,
   clearCacheFor,
 } from '../src/index.ts'
-import { assertReadArgs, parseContentRange } from '../src/util.ts'
+import {
+  assertReadArgs,
+  declaredLength,
+  parseContentRange,
+} from '../src/util.ts'
 
 import type { GenericFilehandle } from 'generic-filehandle2'
 
@@ -936,5 +940,206 @@ describe('the options a handle was constructed with', () => {
       overrides: { signal: stale.signal },
     })
     expect(bytes.length).toBe(100)
+  })
+})
+
+// A server with no range support answers a range request with 200 and the whole
+// file. `assertServedTheRange` has always refused that above offset 0, where
+// the body would be sliced at offsets it does not cover; what nothing refused
+// was the *size* of it. `res.arrayBuffer()` allocates the entire body, so a
+// stat() of a large file allocated the whole file to read one number and a
+// 256 KiB read allocated it again — dying of memory or hanging, on the one
+// misconfiguration this package has an exact message for.
+describe('a server that ignores Range and declares how much it is sending', () => {
+  /** a 200 whose body reports when something actually reads it */
+  function wholeFileServer(
+    size: number,
+    extraHeaders: Record<string, string> = {},
+  ) {
+    const state = { pulled: false, requests: 0 }
+    const fetchImpl = async () => {
+      state.requests++
+      const body = new ReadableStream(
+        {
+          pull(controller) {
+            state.pulled = true
+            controller.enqueue(fileData.slice(0, size))
+            controller.close()
+          },
+        },
+        // a default queuing strategy pulls one chunk the moment the stream is
+        // constructed, whether or not anything ever reads it, which would have
+        // this reporting a download that never happened
+        new CountQueuingStrategy({ highWaterMark: 0 }),
+      )
+      return new Response(body, {
+        status: 200,
+        headers: { 'content-length': String(size), ...extraHeaders },
+      })
+    }
+    return { state, fetchImpl }
+  }
+
+  test('a read is refused before the body is touched', async () => {
+    const { state, fetchImpl } = wholeFileServer(FILE_SIZE)
+    const file = makeFile(nextUrl(), fetchImpl)
+    await expect(file.read(100, 0)).rejects.toThrow(/ignored the Range header/)
+    expect(state.pulled).toBe(false)
+  })
+
+  test('stat answers from the declared length without downloading the file', async () => {
+    const { state, fetchImpl } = wholeFileServer(FILE_SIZE)
+    const file = makeFile(nextUrl(), fetchImpl)
+    // the probe fails by design; its Content-Length is the size, which is all
+    // the probe wanted, so stat() answers rather than reporting a lost header
+    expect(await file.stat()).toEqual({ size: FILE_SIZE })
+    expect(state.pulled).toBe(false)
+  })
+
+  test('and having answered, asks nothing further', async () => {
+    const { state, fetchImpl } = wholeFileServer(FILE_SIZE)
+    const file = makeFile(nextUrl(), fetchImpl)
+    await file.stat()
+    await file.stat()
+    expect(state.requests).toBe(1)
+  })
+
+  test('the size it learned still clamps a read past the end', async () => {
+    const { state, fetchImpl } = wholeFileServer(FILE_SIZE)
+    const file = makeFile(nextUrl(), fetchImpl)
+    await file.stat()
+    expect(await file.read(100, FILE_SIZE + 10)).toHaveLength(0)
+    // clamped away entirely, so the doomed server was never asked again
+    expect(state.requests).toBe(1)
+  })
+
+  test('a failure with no size in it is still the failure the caller needs', async () => {
+    const file = makeFile(
+      nextUrl(),
+      async () => new Response('', { status: 404 }),
+    )
+    // not flattened into "Content-Range was not readable", which would send a
+    // reader after a CORS header when the file simply is not there
+    await expect(file.stat()).rejects.toThrow(/404/)
+  })
+})
+
+describe('a 200 that is no larger than the range asked for', () => {
+  // the case the offset-0 tolerance exists for: the file really is shorter than
+  // the request, so the whole of it *is* the range that was asked for
+  const SMALL = 4096
+
+  function smallFileServer(headers: HeadersInit) {
+    return async () =>
+      new Response(fileData.slice(0, SMALL), { status: 200, headers })
+  }
+
+  test('is read, not refused', async () => {
+    const file = makeFile(
+      nextUrl(),
+      smallFileServer({ 'content-length': String(SMALL) }),
+    )
+    expect(await file.read(100, 0)).toEqual(fileData.slice(0, 100))
+  })
+
+  test('and its length is the size of the file', async () => {
+    const file = makeFile(
+      nextUrl(),
+      smallFileServer({ 'content-length': String(SMALL) }),
+    )
+    await file.read(100, 0)
+    expect(await file.stat()).toEqual({ size: SMALL })
+  })
+
+  test('a body that declares no length at all is read as it always was', async () => {
+    // chunked: there is nothing to compare against until it has all arrived
+    const file = makeFile(nextUrl(), smallFileServer({}))
+    expect(await file.read(100, 0)).toEqual(fileData.slice(0, 100))
+  })
+
+  test('an encoded length is not a count of the bytes, so it is not judged', async () => {
+    // Content-Length is what is on the wire; a gzipped whole file can declare
+    // ten bytes and hand back two megabytes
+    const file = makeFile(
+      nextUrl(),
+      async () =>
+        new Response(fileData.slice(0, SMALL), {
+          status: 200,
+          headers: { 'content-length': '10', 'content-encoding': 'gzip' },
+        }),
+    )
+    expect(await file.read(100, 0)).toEqual(fileData.slice(0, 100))
+  })
+})
+
+describe('a read that starts past the end of the file', () => {
+  // a size that does not fall on a chunk boundary, so `start` past the end and
+  // `end` clamped to it still share the file's last chunk
+  const RAGGED = CHUNK + 1000
+
+  function raggedServer(log: { start: number; end: number }[]) {
+    return async (_url: string | URL | Request, init?: RequestInit) => {
+      const { start, end: asked } = requestedRange(init)
+      const end = Math.min(asked, RAGGED - 1)
+      log.push({ start, end })
+      return new Response(fileData.slice(start, end + 1), {
+        status: 206,
+        headers: { 'content-range': `bytes ${start}-${end}/${RAGGED}` },
+      })
+    }
+  }
+
+  test('asks for nothing, having nothing to assemble', async () => {
+    const log: { start: number; end: number }[] = []
+    const file = makeFile(nextUrl(), raggedServer(log))
+    await file.stat()
+    log.length = 0
+    expect(await file.read(100, RAGGED)).toHaveLength(0)
+    expect(log).toEqual([])
+  })
+
+  test('including one that starts inside the last chunk but past the end', async () => {
+    const log: { start: number; end: number }[] = []
+    const file = makeFile(nextUrl(), raggedServer(log))
+    await file.stat()
+    log.length = 0
+    expect(await file.read(100, RAGGED + 500)).toHaveLength(0)
+    expect(log).toEqual([])
+  })
+
+  test('a read that merely runs past the end is still served', async () => {
+    const log: { start: number; end: number }[] = []
+    const file = makeFile(nextUrl(), raggedServer(log))
+    await file.stat()
+    expect(await file.read(5000, RAGGED - 100)).toHaveLength(100)
+  })
+})
+
+describe('declaredLength', () => {
+  function res(headers: HeadersInit) {
+    return new Response('', { headers })
+  }
+
+  test('reads a plain Content-Length', () => {
+    expect(declaredLength(res({ 'content-length': '12345' }))).toBe(12345)
+  })
+
+  test('ignores one that counts encoded bytes instead', () => {
+    expect(
+      declaredLength(
+        res({ 'content-length': '12345', 'content-encoding': 'gzip' }),
+      ),
+    ).toBeUndefined()
+  })
+
+  test.for(['', 'abc', '12abc', '-5', '1.5', '1e400'])(
+    '%o is not a length',
+    header => {
+      expect(declaredLength(res({ 'content-length': header }))).toBeUndefined()
+    },
+  )
+
+  test('absent is undefined rather than zero', () => {
+    expect(declaredLength(res({}))).toBeUndefined()
   })
 })
