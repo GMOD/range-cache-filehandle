@@ -9,7 +9,7 @@ import {
   recordSize,
   recordSizeIfUnknown,
 } from './chunkCache.ts'
-import { RESPONSE_TIMEOUT_MS } from './constants.ts'
+import { CHUNK_SIZE, RESPONSE_TIMEOUT_MS } from './constants.ts'
 import {
   isNetworkRejection,
   networkFailureHint,
@@ -18,10 +18,10 @@ import {
 } from './errors.ts'
 import {
   assertReadArgs,
-  declaredLength,
   discardBody,
   parseByteRange,
   parseContentRange,
+  readBodyAtMost,
 } from './util.ts'
 
 import type { FilehandleOptions } from 'generic-filehandle2'
@@ -79,45 +79,28 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       // and through oncePerKey, so those N readers share one request rather
       // than making N of them for one number.
       await oncePerKey(this.url, () =>
-        limitConcurrency(this.url, () => this.probeSize()),
+        limitConcurrency(this.url, () => this.fetchRange(this.url, 0, 0)),
       )
     }
     const size = getSize(this.url)
     if (size === undefined) {
-      // Content-Range header wasn't observable (commonly CORS hiding it).
-      // Throw rather than silently returning size: 0 — that lie tends to cause
-      // downstream callers to issue zero-byte reads or treat the file as empty.
-      // Callers that can degrade gracefully should wrap stat() in try/catch.
+      // No Content-Range carrying a length came back. Throw rather than
+      // silently returning size: 0 — that lie tends to cause downstream callers
+      // to issue zero-byte reads or treat the file as empty. Callers that can
+      // degrade gracefully should wrap stat() in try/catch.
       //
-      // The request itself succeeded, so this is the one CORS misconfiguration
-      // that is invisible from the network tab: the header is on the wire and
-      // the browser will not let the page read it. Name the header to add.
+      // The request itself succeeded, so the usual cause is the CORS
+      // misconfiguration that is invisible from the network tab: the header is
+      // on the wire and the browser will not let the page read it. Name the
+      // header to add — but name the other cause too, because a server sending
+      // `bytes 0-0/*` has exposed the header correctly and simply declined to
+      // give a total, and being told to expose a header it already exposes is
+      // an afternoon lost.
       throw new Error(
-        `Could not determine size of ${this.url} (the server answered but the Content-Range header was not readable; a cross-origin server has to send Access-Control-Expose-Headers: Content-Range before the browser will show it to the page)`,
+        `Could not determine size of ${this.url} (the server answered, but no Content-Range carrying the length of the file came back with it: either the header was not readable, which cross-origin needs Access-Control-Expose-Headers: Content-Range to fix, or the server sent the "bytes 0-0/*" form and declined to say how long the file is)`,
       )
     } else {
       return { size }
-    }
-  }
-
-  /**
-   * One request for the size and nothing else.
-   *
-   * The smallest range there is, so a server that honours it answers with one
-   * byte and a `Content-Range` carrying the length. A server that does not
-   * honour it fails the read — see {@link assertRangeWasHonored} — having first
-   * recorded the size its `Content-Length` declared, which is everything this
-   * probe wanted. That case alone is swallowed; a 404, a network failure or a
-   * body that arrives without declaring a length still reaches the caller,
-   * rather than being flattened into the Content-Range message below.
-   */
-  private async probeSize() {
-    try {
-      await this.fetchRange(this.url, 0, 0)
-    } catch (e) {
-      if (!hasSize(this.url)) {
-        throw e
-      }
     }
   }
 
@@ -170,15 +153,16 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       return new Uint8Array(0)
     }
     assertServedTheRange(res, url, start, end)
-    assertRangeWasHonored(res, url, start, end)
-    const buffer = new Uint8Array(await res.arrayBuffer())
     // The first successful range fetch populates the size cache, so a later
     // stat() needs no HEAD of its own.
     if (res.status === 200) {
       // no Content-Range on a 200, but the body is the entire file
+      const buffer = await readWholeFile(res, url, start, end)
       recordSizeIfUnknown(url, buffer.byteLength)
+      return buffer
     } else {
       const range = parseContentRange(res.headers.get('content-range'))
+      const buffer = await readDeclaredRange(res, url, range)
       // Validate before recording. A response this rejects has still told us a
       // `total`, and recordSizeIfUnknown never overwrites, so recording first
       // lets a proxy with a wrong Content-Range fix the size of the file at
@@ -186,8 +170,8 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       // answering with it, for the life of the process.
       assertBodyMatchesRange(res, url, start, end, buffer, range)
       recordSizeIfUnknown(url, range?.total)
+      return buffer
     }
-    return buffer
   }
 
   /**
@@ -397,41 +381,49 @@ function assertServedTheRange(
 }
 
 /**
- * Reject a 200 that is about to hand back more bytes than were asked for.
+ * The whole file, from a server that ignored the Range header — but only as
+ * much of it as the range asked for.
  *
- * A 200 to a range request means the server ignored the Range header, and
+ * A 200 to a range request means there is no range support here, and
  * {@link assertServedTheRange} already refuses that anywhere but at offset 0,
  * where the body does at least begin with the bytes that were wanted. What it
  * cannot refuse is the *size* of what is coming, and that is the half that
- * hurts: `res.arrayBuffer()` allocates the whole body, so `stat()` of a 100 GB
- * BAM on a server with no range support allocates 100 GB to read one number,
- * and every 256 KiB read of it allocates 100 GB again. Both die of memory or
- * hang, with nothing said — on the one misconfiguration this package can name
- * exactly, and already has a hint written for.
+ * hurts: reading a body allocates all of it, so `stat()` of a 100 GB BAM on
+ * such a server allocated 100 GB to learn one number, and every 256 KiB read of
+ * it allocated 100 GB again. Both died of memory or hung, with nothing said —
+ * on the one misconfiguration this package can name exactly, and already has a
+ * hint written for.
  *
- * So the declared length is checked before the body is touched, and the size it
- * declared is kept on the way out: the request is failing, but a body that is
- * the whole file has still told us how long the file is, which is all
- * {@link probeSize} wanted.
+ * So the body is read under a ceiling and the request fails the moment it goes
+ * past. Under the ceiling it is served: a file shorter than the range asked for
+ * is the honest case the offset-0 tolerance exists for — the whole of it *is*
+ * the range — and its length is the length of the file, which is how a `stat()`
+ * of a small file on a range-ignoring server still answers.
  *
- * A body no longer than the range asked for passes. That is the honest case the
- * offset-0 tolerance exists for — the file really is shorter than the request,
- * so the whole of it *is* the range — and it stays working.
+ * The ceiling is at least {@link CHUNK_SIZE} because the size probe asks for a
+ * single byte. Left at the range asked for, the smallest request there is would
+ * refuse every file bigger than one byte, and a small file on a server with no
+ * range support — which this package can serve perfectly well, one chunk at a
+ * time — would stop working.
  *
- * Only checkable where the response declares a length of its own bytes. A
- * chunked or content-encoded 200 falls through to reading the body, since there
- * is nothing to compare against until it has all arrived.
+ * Nothing here reads `Content-Length`. It counts the bytes on the wire, so a
+ * `Content-Encoding` makes it the compressed count, and `Content-Encoding` is
+ * the header a browser withholds cross-origin while showing `Content-Length` —
+ * so trusting it recorded a gzipped file's compressed size as the size of the
+ * file, and reads past that point were then clamped to nothing and returned
+ * empty rather than failing. Only the bytes know how many there are.
  */
-function assertRangeWasHonored(
+async function readWholeFile(
   res: Response,
   url: string,
   start: number,
   end: number,
 ) {
-  const declared = res.status === 200 ? declaredLength(res) : undefined
-  if (declared !== undefined && declared > end - start + 1) {
-    recordSizeIfUnknown(url, declared)
-    discardBody(res)
+  const buffer = await readBodyAtMost(
+    res,
+    Math.max(end - start + 1, CHUNK_SIZE),
+  )
+  if (buffer === undefined) {
     throw Object.assign(
       new Error(
         `HTTP 200 fetching ${url} bytes ${start}-${end}${statusHint(200)}`,
@@ -439,6 +431,47 @@ function assertRangeWasHonored(
       { status: 200 },
     )
   }
+  return buffer
+}
+
+/**
+ * The bytes of a 206, holding no more of them than it said it was sending.
+ *
+ * `assertBodyMatchesRange` below has always compared the body against the range
+ * the header declared, but it could only do that once the body was already in
+ * memory — so a proxy answering a 256 KiB request with an honest
+ * `bytes 0-262143/...` and then streaming the whole file allocated the whole
+ * file and *then* reported the mismatch. Measured: 8 MB held for a 262144-byte
+ * request. Same rule, applied a step earlier, where it costs the ceiling rather
+ * than the file.
+ *
+ * Only where the header says how long the range is and the body is those bytes
+ * — the same two conditions the length check downstream is already gated on. A
+ * `Content-Range` hidden by CORS leaves nothing to bound against, and under a
+ * `Content-Encoding` the bytes on the wire are not the bytes of the range, so
+ * neither is checkable and both read as before.
+ */
+async function readDeclaredRange(
+  res: Response,
+  url: string,
+  range: ReturnType<typeof parseContentRange>,
+) {
+  if (
+    range?.start === undefined ||
+    range.end === undefined ||
+    range.end < range.start ||
+    res.headers.get('content-encoding')
+  ) {
+    return new Uint8Array(await res.arrayBuffer())
+  }
+  const declared = range.end - range.start + 1
+  const buffer = await readBodyAtMost(res, declared)
+  if (buffer === undefined) {
+    throw new Error(
+      `${url} sent more than the ${declared} bytes of the range ${range.start}-${range.end} it declared (the body runs past its own Content-Range, so neither the header nor the bytes can be trusted; a caching proxy in front of the file is the usual cause)`,
+    )
+  }
+  return buffer
 }
 
 /**
@@ -460,8 +493,9 @@ function assertRangeWasHonored(
  * file it reports — and it has to start where the request did.
  *
  * The second two compare the body against that header: it has to be as long as
- * the range says, and the range has to reach either the end that was asked for
- * or the end of the file. Without the last, a proxy that caps how much of a
+ * the range says — a body *longer* than that never reaches here, having been
+ * stopped at the ceiling by {@link readDeclaredRange} — and the range has to
+ * reach either the end that was asked for or the end of the file. Without the last, a proxy that caps how much of a
  * range it will serve answers a 6 MB request with an accurate
  * `bytes 0-1048575/8388608` and a matching 1 MB body: honest about itself,
  * silently short against the request, and indistinguishable from EOF by the

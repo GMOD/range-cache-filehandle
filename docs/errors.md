@@ -19,19 +19,25 @@ to do about it.
   every chunk past the first would be filled with data from the wrong position —
   silently, surfacing much later as something like `invalid bgzf header`. It is
   tolerated only when the request started at 0, where the body genuinely covers
-  the requested bytes, **and only when it is no longer than the range that was
-  asked for**. That second half is about memory rather than offsets: reading a
-  body allocates all of it, so a `stat()` of a 100 GB BAM on a server with no
-  range support used to allocate 100 GB to learn one number, and every 256 KiB
-  read allocated it again. Now the declared length is checked before the body is
-  touched, and a server sending more than was asked for gets this message
-  instead of the process dying of memory. A file that really is shorter than the
-  request still passes, since the whole of it _is_ the range.
+  the requested bytes, **and only for as much of it as the range asked for**.
+  That second half is about memory rather than offsets: reading a body allocates
+  all of it, so a `stat()` of a 100 GB BAM on a server with no range support
+  used to allocate 100 GB to learn one number, and every 256 KiB read allocated
+  it again. The body is now read under a ceiling and the request fails the
+  moment it goes past, so this message arrives instead of the process dying of
+  memory. A file that really is shorter than the request still passes, since the
+  whole of it _is_ the range — the ceiling is at least one 256 KiB chunk,
+  because the size probe asks for a single byte and every file is bigger than
+  that.
 
-  The check needs the response to declare a length of its own bytes. A chunked
-  200 declares none, and a `Content-Encoding` makes `Content-Length` the
-  compressed count — the same distinction the `Content-Range` checks below draw
-  — so both fall through to reading the body as before.
+  The ceiling is measured against the bytes, not against `Content-Length`. That
+  header counts what is on the wire, so a `Content-Encoding` makes it the
+  compressed count — and `Content-Encoding` is not CORS-safelisted while
+  `Content-Length` is, so cross-origin the browser hides exactly the header that
+  would have said the number was unusable. Trusting it recorded a gzipped file's
+  compressed size as the size of the file. A chunked body, which is what nginx
+  sends the moment it gzips, declares no length at all. Only the bytes know how
+  many there are.
 
 - **401 / 403** — the file is there and the request was refused. A signed URL
   may have expired, or a bucket policy may not grant read to the page origin.
@@ -99,14 +105,17 @@ watching any more.
 ## The one that succeeds and still fails
 
 `stat()` throws rather than returning `size: 0` when the request came back fine
-but `Content-Range` was not readable. Returning zero is a lie that tends to make
-downstream callers issue zero-byte reads or treat the file as empty, and the
-failure then surfaces nowhere near its cause.
+but no `Content-Range` carrying a length came with it. Returning zero is a lie
+that tends to make downstream callers issue zero-byte reads or treat the file as
+empty, and the failure then surfaces nowhere near its cause.
 
-This is the one CORS misconfiguration invisible from the network tab: the header
-is on the wire and the browser will not let the page read it. The message names
-the header to add. A caller that can degrade gracefully should wrap `stat()` in
-a `try`/`catch`.
+The usual cause is the one CORS misconfiguration invisible from the network tab:
+the header is on the wire and the browser will not let the page read it. The
+message names the header to add — and names the other cause with it, since a
+server answering `bytes 0-0/*` has exposed the header correctly and simply
+declined to give a total, and being sent to expose a header it already exposes
+is an afternoon lost. A caller that can degrade gracefully should wrap `stat()`
+in a `try`/`catch`.
 
 ## The one nothing here can check
 
@@ -116,6 +125,11 @@ for, and the body has to be as long as it says and reach either the end asked
 for or the end of the file. A body shorter than the range it claims is what that
 last pair is for — nothing downstream can tell a truncated response from the end
 of the file, since a short chunk _is_ how this package represents EOF.
+
+The length half of that is also a ceiling on what gets held: a body is read only
+as far as the range the header declared, so a proxy that answers a 256 KiB
+request with an honest `Content-Range` and then streams the whole file is
+stopped at the ceiling rather than allocated in full and rejected afterwards.
 
 **A `Content-Encoding` puts the length half of that out of reach.** The bytes on
 the wire are then not the bytes of the range, so their count says nothing, and

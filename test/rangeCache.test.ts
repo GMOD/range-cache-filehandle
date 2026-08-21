@@ -815,8 +815,12 @@ describe('RemoteFileWithRangeCache', () => {
   // bytes from position 0 as if they came from `start` (classic symptom
   // downstream: "invalid bgzf header").
   describe('server that ignores range requests', () => {
+    // small enough to be the range that was asked for. A whole file bigger than
+    // a chunk is refused rather than held, however it declares itself — see
+    // failureModes.test.ts
+    const SMALL = 4096
     function rangeIgnoringFetch() {
-      return async () => new Response(fileData, { status: 200 })
+      return async () => new Response(fileData.slice(0, SMALL), { status: 200 })
     }
 
     test('throws instead of returning wrong bytes for a range past byte 0', async () => {
@@ -837,7 +841,7 @@ describe('RemoteFileWithRangeCache', () => {
       const file = makeFile(rangeIgnoringFetch())
       await fetchRange(file, 0, 99)
       // there is no Content-Range on a 200, but the body is the whole file
-      expect(await file.stat()).toEqual({ size: FILE_SIZE })
+      expect(await file.stat()).toEqual({ size: SMALL })
     })
   })
 })

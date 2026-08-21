@@ -64,11 +64,13 @@ headers: no `Content-Range`, no `Content-Length`. Read the size with `stat()`.
 purpose.
 
 That probe is the smallest range there is, so a server with no range support
-answers it with the entire file. Its `Content-Length` is the size, which is all
-the probe wanted, so `stat()` takes it from the header and never reads the body
-— the probe's own failure is swallowed in exactly that case, and in no other. A
-404, a network failure, or a body that arrives declaring no length at all still
-reaches you as itself rather than as the missing-`Content-Range` message below.
+answers it with the entire file. Up to one 256 KiB chunk of that is read and its
+length taken as the size — a file that small is served whole by any request, so
+such a server works here one chunk at a time. Past the ceiling the probe fails
+with the 200 message from [errors.md](errors.md#a-status-came-back), which names
+the missing range support rather than the `Content-Range` header below.
+`Content-Length` is not consulted: cross-origin it can be a compressed count
+with the `Content-Encoding` that would have said so hidden by CORS.
 
 **It throws rather than reporting `size: 0`** when the server answered but the
 header was not readable — the CORS misconfiguration that is invisible in the

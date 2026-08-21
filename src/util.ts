@@ -78,25 +78,55 @@ export function discardBody(res: Response) {
 }
 
 /**
- * How long a response says its body is, where that is a count of the bytes it
- * is about to hand back.
+ * The bytes of a response, refusing to hold more than `limit` of them.
  *
- * `Content-Length` counts what is on the wire, so a `Content-Encoding` makes it
- * the compressed length and it says nothing about how much a caller is about to
- * hold — the same distinction `assertBodyMatchesRange` draws. Undefined for a
- * chunked response, which does not declare a length at all, so nothing may
- * depend on this being there.
+ * `res.arrayBuffer()` allocates whatever arrives, and a server with no range
+ * support answers a range request with 200 and the whole file — so a `stat()`
+ * of a 100 GB BAM allocated 100 GB to learn one number, and every 256 KiB read
+ * of it allocated 100 GB again. Both died of memory or hung, on the one
+ * misconfiguration this package has an exact message for.
+ *
+ * Undefined once more than `limit` bytes have arrived, with the rest of the
+ * body cancelled unread. Deliberately measured against the bytes themselves
+ * rather than against `Content-Length`: that header counts what is on the wire,
+ * so a `Content-Encoding` makes it the compressed count, and cross-origin it is
+ * `Content-Encoding` that the browser hides — it is not CORS-safelisted, while
+ * `Content-Length` is — leaving a compressed count that is indistinguishable
+ * from an honest one. A chunked body declares no length at all, which is what
+ * nginx sends the moment it gzips. The body is the only thing that knows.
+ *
+ * Reads one step past `limit` on purpose: a body of exactly `limit` bytes is
+ * within it, and only asking again separates that from one that goes on.
  */
-export function declaredLength(res: Response) {
-  const header = res.headers.get('content-encoding')
-    ? null
-    : res.headers.get('content-length')
-  // `Number`, not `parseInt`: `parseInt('12abc')` is 12, and a length that is
-  // only partly a number is not one to allocate against. The empty string has
-  // to be turned away first, though — `Number('')` is 0, so a malformed
-  // `Content-Length:` with nothing after it would declare a body of no bytes.
-  const length = header?.trim() ? Number(header) : Number.NaN
-  return Number.isSafeInteger(length) && length >= 0 ? length : undefined
+export async function readBodyAtMost(res: Response, limit: number) {
+  const reader = res.body?.getReader()
+  const parts: Uint8Array[] = []
+  let total = 0
+  if (reader) {
+    let ended = false
+    while (!ended && total <= limit) {
+      const step = await reader.read()
+      if (step.done) {
+        ended = true
+      } else {
+        parts.push(step.value)
+        total += step.value.byteLength
+      }
+    }
+    if (!ended) {
+      reader.cancel().catch(() => undefined)
+    }
+  }
+  if (total > limit) {
+    return undefined
+  }
+  const bytes = new Uint8Array(total)
+  let at = 0
+  for (const part of parts) {
+    bytes.set(part, at)
+    at += part.byteLength
+  }
+  return bytes
 }
 
 /**
