@@ -17,17 +17,33 @@ git-cliff, then pushes the tag, which triggers the publish workflow.
 
 ## Docs
 
-`docs/img/dataflow.svg` is generated from `docs/img/dataflow.dot` and committed,
-since GitHub does not render DOT. If you edit the `.dot`, re-render it in the
-same commit:
+Two of the diagrams are drawn from the source rather than by hand, so that a
+change nobody redraws is a failing test rather than a picture that has quietly
+stopped being true:
+
+```sh
+pnpm diagrams
+```
+
+`docs/img/architecture.dot` is the call graph — every node a function in `src/`,
+every edge a call the source makes, every number read from `constants.ts`.
+`docs/img/chunks.svg` is drawn by _running_ the chunk cache against a recording
+`fetch`: the chunk states and the range headers in it are what that read
+actually did. `test/diagrams.test.ts` regenerates both and compares, and a step
+that has been renamed out of `NODES` fails with the name it can no longer find.
+
+`docs/img/dataflow.svg` is the exception, hand-drawn from `dataflow.dot` and
+committed since GitHub does not render DOT:
 
 ```sh
 dot -Tsvg docs/img/dataflow.dot -o docs/img/dataflow.svg
 ```
 
-Nothing checks this — graphviz is not a dependency and different versions emit
-different SVG bytes, so a staleness check would fail on toolchain drift rather
-than on a stale diagram.
+Both `.svg` renders of a `.dot` are committed and unchecked, because graphviz is
+not a dependency and different versions emit different SVG bytes — a staleness
+check on them would fail on toolchain drift rather than on a stale diagram.
+`pnpm diagrams` re-renders `architecture.svg` where graphviz exists and says so
+where it does not.
 
 ## Publishing
 
