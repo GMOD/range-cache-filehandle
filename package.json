@@ -31,6 +31,7 @@
   "scripts": {
     "test": "vitest",
     "clean": "rimraf dist esm",
+    "diagrams": "node scripts/generate-diagrams.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint --report-unused-disable-directives --max-warnings 0",
