@@ -1,3 +1,18 @@
+## [1.3.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.2.0...v1.3.0) (2026-08-23)
+
+### Bug Fixes
+
+- Refuse a 200 that declares more bytes than the range asked for ([7127aa9](https://github.com/GMOD/range-cache-filehandle/commit/7127aa93dc39aa645989a6f4e26f9d2f66f8c652))
+- Bound body reads instead of trusting Content-Length for size ([cc08eb2](https://github.com/GMOD/range-cache-filehandle/commit/cc08eb25ea90574a5111f7ca5f46050053c0bb53))
+
+### Documentation
+
+- Generate the architecture and chunk diagrams from the source ([a2015a3](https://github.com/GMOD/range-cache-filehandle/commit/a2015a3f7d34eed2f297133c371fcfdf9d28e7a6))
+
+### Features
+
+- A cached handle says where its bytes come from ([f9cf573](https://github.com/GMOD/range-cache-filehandle/commit/f9cf57367f108409d8a4ca344fc5b52667adfb20))
+
 ## [1.2.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.1.0...v1.2.0) (2026-08-17)
 
 ### Bug Fixes
