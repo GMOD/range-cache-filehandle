@@ -29,6 +29,18 @@ export class CachedFilehandle implements GenericFilehandle {
   private inner: GenericFilehandle
   private key: string
 
+  /**
+   * The wrapped handle's address, **not** `key`. The two differ exactly where it
+   * matters: `key` has to be unique per file and so is invented for a Blob
+   * (`blob://<some id>`), which is not an address anyone can go and look at.
+   * Delegating means a wrapper is as honest as what it wraps — a Blob's is
+   * undefined, and a caller naming a stuck read says nothing rather than showing
+   * an id it made up. See {@link GenericFilehandle.source}.
+   */
+  public get source() {
+    return this.inner.source
+  }
+
   constructor(inner: GenericFilehandle, key: string) {
     this.inner = inner
     this.key = key

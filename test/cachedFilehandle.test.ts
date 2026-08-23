@@ -230,3 +230,35 @@ describe('CachedFilehandle wraps any filehandle', () => {
     await expect(file.close()).resolves.toBeUndefined()
   })
 })
+
+// `key` and `source` answer different questions and must not be confused: the
+// key namespaces chunks and so is invented where there is no name, while the
+// source is an address a person can go and look at. Delegating is what keeps a
+// wrapper as honest as the handle it wraps.
+describe('source', () => {
+  test('is the wrapped handle’s, not the cache key', () => {
+    const inner = new RemoteFileWithRangeCache('https://example.com/data.bam')
+    expect(new CachedFilehandle(inner, 'some-cache-key').source).toBe(
+      'https://example.com/data.bam',
+    )
+  })
+
+  test('is undefined when the wrapped handle has no address', () => {
+    const blobLike: GenericFilehandle = {
+      read: () => Promise.resolve(new Uint8Array(0)),
+      readFile: (() => Promise.resolve(new Uint8Array(0))) as never,
+      stat: () => Promise.resolve({ size: 0 }),
+      close: () => Promise.resolve(),
+    }
+    // the invented key is exactly what must NOT reach a caller naming a file
+    expect(
+      new CachedFilehandle(blobLike, 'blob://a3f9c1').source,
+    ).toBeUndefined()
+  })
+
+  test('a RemoteFileWithRangeCache is its url', () => {
+    expect(
+      new RemoteFileWithRangeCache('https://example.com/data.bam').source,
+    ).toBe('https://example.com/data.bam')
+  })
+})

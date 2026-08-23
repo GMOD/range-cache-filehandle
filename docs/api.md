@@ -123,7 +123,13 @@ key share chunks — right for two handles on one path, wrong for two unrelated
 blobs.
 
 `read` and `stat` go through the cache (`stat` recording the size it gets, so
-past-EOF reads clamp); `readFile` and `close` pass through untouched.
+past-EOF reads clamp); `readFile` and `close` pass through untouched, and
+`source` delegates.
+
+Delegating rather than returning `key` is deliberate, and the `Blob` case is
+why. A key is invented where there is no name; `source` is an address someone
+can go and look at, so a wrapper around a `Blob` reports `undefined` and a
+caller naming a slow read says nothing rather than showing an id it made up.
 
 Worth knowing that a local file may not want this at all. The cache buys request
 coalescing, and a `LocalFile` read is a positional read on an already-open

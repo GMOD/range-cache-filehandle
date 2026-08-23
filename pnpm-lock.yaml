@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       generic-filehandle2:
-        specifier: ^2.2.1
-        version: 2.3.1
+        specifier: ^2.4.0
+        version: 2.4.0
     devDependencies:
       '@eslint/js':
         specifier: ^10.0.1
@@ -681,8 +681,8 @@ packages:
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
 
-  generic-filehandle2@2.3.1:
-    resolution: {integrity: sha512-WuEud2h4xC4H3m9BmULDiicOlP3k+cCSItD5EqgwmoZzG5W97qF1Qda4O4HWLTo27J+yEkOV1FmPd7kolnHEEQ==}
+  generic-filehandle2@2.4.0:
+    resolution: {integrity: sha512-+ah1SBkiusKbBguKuj11zrdAMRdWE9g3zPTtUQtC5LRCGvbfg534KHRjolJFnapCj0Xtt4ZQxs86Vr/WpfuZ8A==}
 
   get-stream@9.0.1:
     resolution: {integrity: sha512-kVCxPF3vQM/N0B1PmoqVUqgHP+EeVjmZSQn+1oCRPxd2P21P2F19lIgbR3HBosbB1PUhOAoctJnfEn2GbN2eZA==}
@@ -1799,7 +1799,7 @@ snapshots:
   fsevents@2.3.3:
     optional: true
 
-  generic-filehandle2@2.3.1: {}
+  generic-filehandle2@2.4.0: {}
 
   get-stream@9.0.1:
     dependencies:
