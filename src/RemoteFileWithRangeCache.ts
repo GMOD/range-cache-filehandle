@@ -213,7 +213,12 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       return { res, deadline }
     } catch (e) {
       deadline.dispose()
-      throw describeFetchFailure(e, deadline, url, start, end)
+      throw describeFetchFailure(
+        e,
+        deadline,
+        url,
+        `${url} bytes ${start}-${end}`,
+      )
     }
   }
 
@@ -323,7 +328,46 @@ export class RemoteFileWithRangeCache extends RemoteFile {
         return new Response(buffer, { status: 206 })
       }
     }
-    return super.fetch(url, init)
+    return typeof url === 'string'
+      ? this.fetchWholeFile(url, init)
+      : super.fetch(url, init)
+  }
+
+  /**
+   * `super.fetch` for a whole-file read, under the same response deadline the
+   * range path uses.
+   *
+   * It reaches here from `RemoteFile.readFile`, which sends no range header, so
+   * before this it was the one HTTP path in the class with no clock on it at
+   * all — and the one where waiting forever is most visible, because a
+   * whole-file read is what an assembly's chrom.sizes, chromAlias and cytoband
+   * files are. A hub that accepted the connection and went silent left the
+   * caller with a spinner and no error, indefinitely.
+   *
+   * The deadline is safe here for exactly the reason it is safe there: it bounds
+   * the wait for the response, and is stood down the moment the headers arrive.
+   * A whole-file body is routinely large and may take as long as it takes.
+   *
+   * Not disposed on success, deliberately, and for the same reason
+   * {@link fetchWithDeadline} does not: the link to the caller's signal is what
+   * carries a cancellation to the socket while the body streams, and the body
+   * belongs to whoever we hand the response to. `responded` has already stopped
+   * the clock, so nothing is left to fire.
+   */
+  private async fetchWholeFile(url: string, init: RequestInit | undefined) {
+    const deadline = withResponseDeadline(
+      init?.signal,
+      () =>
+        `No response from ${url} after ${RESPONSE_TIMEOUT_MS / 1000}s (the connection was open and the server sent nothing; a transfer already under way is not subject to this limit, so this is a stalled request rather than a slow one)`,
+    )
+    try {
+      const res = await super.fetch(url, { ...init, signal: deadline.signal })
+      deadline.responded()
+      return res
+    } catch (e) {
+      deadline.dispose()
+      throw describeFetchFailure(e, deadline, url, url)
+    }
   }
 }
 
@@ -335,8 +379,9 @@ function describeFetchFailure(
   e: unknown,
   deadline: { expired?: Error; signal: AbortSignal },
   url: string,
-  start: number,
-  end: number,
+  // what was being fetched, for the message: a byte range on the range path,
+  // the file itself on the whole-file one
+  what: string,
 ) {
   if (deadline.expired) {
     return deadline.expired
@@ -346,7 +391,7 @@ function describeFetchFailure(
     // cancelled pan explained as a CORS misconfiguration, which is the worst
     // place to be confidently wrong.
     return new Error(
-      `Network error fetching ${url} bytes ${start}-${end}${networkFailureHint(url)}`,
+      `Network error fetching ${what}${networkFailureHint(url)}`,
       { cause: e },
     )
   } else {

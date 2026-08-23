@@ -115,7 +115,13 @@ export const MAX_SIZE_ENTRIES = 5000
  * gets the error it would retry on. Thirty seconds is deliberately generous; a
  * server that has not begun to answer by then is not about to.
  *
- * Only the HTTP path carries one. `CachedFilehandle` wraps a local file or a
- * Blob, which return or throw; there is no socket there to sit open on.
+ * Both HTTP paths carry one: a range read, and a whole-file `readFile`, which
+ * sends no range header and so takes the plain fetch. The whole-file path
+ * matters more than its share of the traffic suggests — an assembly's
+ * chrom.sizes, chromAlias and cytoband files are all read that way, and it was
+ * the last path here with no clock on it at all.
+ *
+ * `CachedFilehandle` carries none. It wraps a local file or a Blob, which return
+ * or throw; there is no socket there to sit open on.
  */
 export const RESPONSE_TIMEOUT_MS = 30_000

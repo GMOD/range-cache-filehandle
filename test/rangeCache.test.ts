@@ -1402,3 +1402,84 @@ describe('RemoteFileWithRangeCache idle sweep', () => {
     expect(calls).toEqual([0, CHUNK, 0])
   })
 })
+
+// Whole-file reads reach `fetch` with no range header and went straight to
+// `super.fetch`, so this was the one HTTP path in the class with no clock on it
+// — and the one where waiting forever is most visible, since an assembly's
+// chrom.sizes, chromAlias and cytoband files are all read this way. A hub that
+// accepted the connection and went silent left a spinner and no error.
+describe('the response deadline covers whole-file reads too', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  async function flush() {
+    for (let i = 0; i < 20; i++) {
+      await Promise.resolve()
+    }
+  }
+
+  function silentFetch() {
+    const seenRange: (string | null)[] = []
+    const mockFetch = async (
+      _url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      seenRange.push(new Headers(init?.headers).get('range'))
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(init.signal!.reason as Error)
+        })
+      })
+    }
+    return { seenRange, mockFetch }
+  }
+
+  test('a silent server fails the read instead of hanging forever', async () => {
+    vi.useFakeTimers()
+    const { seenRange, mockFetch } = silentFetch()
+    const read = makeFile(mockFetch).readFile()
+    await flush()
+    // no range header: this is the whole-file path, not the cached one
+    expect(seenRange).toEqual([null])
+
+    vi.advanceTimersByTime(RESPONSE_TIMEOUT)
+    const error = await read.then(
+      () => undefined,
+      (e: unknown) => `${e}`,
+    )
+    expect(error).toMatch(
+      /No response from https:\/\/example\.com\/data\.bin after 30s/,
+    )
+    expect(error).toMatch(/stalled request rather than a slow one/)
+  })
+
+  // the constraint that makes the deadline safe: a whole-file body is routinely
+  // large, and a clock over the transfer would cut off a slow download rather
+  // than a broken one
+  test('a response that arrived stops the clock, however slow the body is', async () => {
+    vi.useFakeTimers()
+    let releaseBody = () => {}
+    const body = new Promise<void>(resolve => {
+      releaseBody = resolve
+    })
+    const slowBodyFetch = async () => ({
+      status: 200,
+      ok: true,
+      headers: new Headers(),
+      bytes: async () => {
+        await body
+        return slice(0, 99)
+      },
+    })
+    const read = makeFile(
+      slowBodyFetch as unknown as typeof globalThis.fetch,
+    ).readFile()
+    await flush()
+    expect(vi.getTimerCount()).toBe(0)
+
+    vi.advanceTimersByTime(RESPONSE_TIMEOUT * 120)
+    releaseBody()
+    expect(await read).toEqual(slice(0, 99))
+  })
+})

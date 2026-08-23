@@ -97,10 +97,14 @@ so, and saying that a transfer already under way is not subject to the limit, so
 this is a stalled request rather than a slow one. [tuning.md](tuning.md) has why
 the deadline covers the response rather than the transfer.
 
-The deadline lives on the shared request rather than on each reader, because
-`fetchRun` coalesces every reader of those chunks onto one fetch — one stalled
-reader with a deadline of its own would strand the rest on a fetch nobody is
-watching any more.
+On the range path the deadline lives on the shared request rather than on each
+reader, because `fetchRun` coalesces every reader of those chunks onto one fetch
+— one stalled reader with a deadline of its own would strand the rest on a fetch
+nobody is watching any more. A whole-file read is nobody's but its own, so it
+carries its own.
+
+The message names the range on the range path and the file on the whole-file
+one, which is also how you can tell which of the two you are looking at.
 
 ## The one that succeeds and still fails
 

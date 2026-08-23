@@ -89,8 +89,14 @@ fetch really is in flight — so the caller waits forever and never gets the err
 it would retry on. Thirty seconds is generous on purpose; a server that has not
 begun to answer by then is not about to.
 
-Only the HTTP path carries a deadline. `CachedFilehandle` wraps a local file or
-a Blob, which return or throw; there is no socket there to sit open on.
+Both HTTP paths carry it: a range read, and a whole-file `readFile`, which sends
+no range header and so takes the plain fetch. The whole-file one matters more
+than its share of the traffic suggests — an assembly's chrom.sizes, chromAlias
+and cytoband files are all read that way, and a hub that accepts the connection
+and goes silent leaves a spinner and no error at all.
+
+`CachedFilehandle` carries no deadline. It wraps a local file or a Blob, which
+return or throw; there is no socket there to sit open on.
 
 The deadline is composed with the caller's signal, never substituted for it —
 replacing it would take cancellation back off the socket, which is the ~6.5 MiB
