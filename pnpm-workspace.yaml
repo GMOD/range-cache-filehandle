@@ -5,5 +5,8 @@ minimumReleaseAge: 4320
 # Same exemption jbrowse-components carries for the same reason.
 minimumReleaseAgeExclude:
   - '@gmod/*'
+  # unscoped, so the glob above does not reach it — but it is as much ours as
+  # anything under @gmod, and this package's releases follow its within minutes
+  - 'generic-filehandle2'
 allowBuilds:
   unrs-resolver: true
