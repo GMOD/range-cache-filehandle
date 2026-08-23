@@ -1,3 +1,9 @@
+## [1.4.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.3.0...v1.4.0) (2026-08-23)
+
+### Bug Fixes
+
+- Put the response deadline on whole-file reads too ([ea510fe](https://github.com/GMOD/range-cache-filehandle/commit/ea510feb6c600e7761bcf8e25aa1c3f1a24ee237))
+
 ## [1.3.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.2.0...v1.3.0) (2026-08-23)
 
 ### Bug Fixes

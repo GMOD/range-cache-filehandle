@@ -1,6 +1,6 @@
 {
   "name": "@gmod/range-cache-filehandle",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "packageManager": "pnpm@11.15.1",
   "description": "A filehandle that caches byte ranges in chunks and coalesces adjacent reads into one request",
   "license": "MIT",
