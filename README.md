@@ -91,6 +91,8 @@ in the process. What each was measured against is in `src/constants.ts` and in
 
 - [docs/api.md](docs/api.md) — every export, and the `recordSize` hook a
   subclass with its own `stat()` needs
+- [docs/optimizations.md](docs/optimizations.md) — what cuts the request count,
+  and what each step was measured to be worth
 - [docs/dataflow.md](docs/dataflow.md) — how a read flows, with the diagram
 - [docs/sharing.md](docs/sharing.md) — one request, several readers, and whose
   abort cancels it
