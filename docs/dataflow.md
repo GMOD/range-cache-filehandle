@@ -12,18 +12,18 @@ separately, and only the chunks nothing has yet reach the network. So a query's
 read pattern — many small, adjacent, semi-random ranges — turns into a few large
 requests, and a second query over the same region turns into none.
 
-The four steps of that, in order.
+Four steps do that, in order: clamping, planning, fetching and assembling.
 
 ## Clamping
 
 `getCachedRange` starts by cutting the requested range down to the file size,
 when the size is known.
 
-That is not a tidiness measure. `@gmod/bam` and `@gmod/tabix` compute the end of
-their last read as `maxv.blockPosition + (1 << 16)` so the final BGZF block is
-read whole, which by construction runs past EOF on the last block of every file.
-Unclamped, that tail asks for chunks that start past the end of the file, and
-the server answers 416.
+Clamping is not a tidiness measure. `@gmod/bam` and `@gmod/tabix` compute the
+end of their last read as `maxv.blockPosition + (1 << 16)` so the final BGZF
+block is read whole, which by construction runs past EOF on the last block of
+every file. Unclamped, that tail asks for chunks that start past the end of the
+file, and the server answers 416.
 
 The size arrives from any of three places: a `Content-Range` header on a 206, a
 `Content-Range` on a 416, or a `stat()`. Whichever comes first fills the size
@@ -110,8 +110,8 @@ for no reuse.
 
 ## What is not here
 
-Nothing is retried. A failed range read surfaces as an error and the reader
-decides — what it says and how it decides is [errors.md](errors.md).
+This layer retries nothing: a failed range read surfaces as an error, and the
+reader decides — what it says and how it decides is [errors.md](errors.md).
 
 There is no per-byte progress. Range reads return a fully-assembled in-memory
 `Response`, so `generic-filehandle2`'s streaming `onProgress` sees the whole

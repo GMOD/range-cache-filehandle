@@ -14,10 +14,10 @@ request. A **chunk** is one 256 KiB cell of the grid; a second read joins at
 chunk granularity, since it may want three chunks of a ten-chunk run and nothing
 else. A **reader** is one call to `read()`, with at most one signal.
 
-So the reference count lives on the run — that is what a request maps to — and
-every chunk the run produces points back at it. `RunState` holds the set of
-signals still waiting, an `AbortController` the request actually runs under, and
-a second controller used only to take the listeners back off.
+The reference count lives on the run: a request maps to one run, and every chunk
+the run produces points back at it. `RunState` holds the set of signals still
+waiting, an `AbortController` the request actually runs under, and a second
+controller used only to take the listeners back off.
 
 The request runs under the run's own signal, never the opening reader's. A
 shared request has to outlive any one reader giving up, and handing `fetch` the
@@ -87,10 +87,10 @@ lives on — and per origin rather than per URL because a presigned URL rotates
 its signature on every read, which would mint a fresh pool each time and cap
 nothing.
 
-`stat()` goes through it too: it is a real request against the same server, and
-N readers opening at once used to issue N stats outside the cap. `stat()` also
-goes through `oncePerKey`, so those N readers share one request rather than
-making N of them for one number.
+`stat()` goes through it too: it is a real request against the same server, so N
+readers opening at once do not issue N stats outside the cap. `stat()` also goes
+through `oncePerKey`, so those N readers share one request rather than making N
+of them for one number.
 
 `clearCache` resumes queued waiters rather than dropping them. A dropped
 resolver strands its caller with no resolve and no reject — a hang rather than a

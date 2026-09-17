@@ -12,8 +12,9 @@ pnpm build
 pnpm version patch  # or minor/major
 ```
 
-That runs lint, format, types, tests and build, regenerates CHANGELOG.md with
-git-cliff, then pushes the tag, which triggers the publish workflow.
+`pnpm version patch` runs lint, format, types, tests and build, regenerates
+CHANGELOG.md with git-cliff, then pushes the tag, which triggers the publish
+workflow.
 
 ## Docs
 
@@ -39,11 +40,11 @@ committed since GitHub does not render DOT:
 dot -Tsvg docs/img/dataflow.dot -o docs/img/dataflow.svg
 ```
 
-Both `.svg` renders of a `.dot` are committed and unchecked, because graphviz is
-not a dependency and different versions emit different SVG bytes — a staleness
-check on them would fail on toolchain drift rather than on a stale diagram.
-`pnpm diagrams` re-renders `architecture.svg` where graphviz exists and says so
-where it does not.
+Both `architecture.svg` and `dataflow.svg` are committed and unchecked, because
+graphviz is not a dependency and different versions emit different SVG bytes — a
+staleness check on them would fail on toolchain drift rather than on a stale
+diagram. `pnpm diagrams` re-renders `architecture.svg` where graphviz exists and
+says so where it does not.
 
 ## Publishing
 

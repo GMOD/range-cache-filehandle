@@ -1,9 +1,9 @@
 # Failing legibly
 
-Nothing here is retried. A failed range read surfaces as an error and the reader
-decides. What the layer owes in exchange is an error that says what happened,
-because the default answers — a bare `TypeError`, or a status number with no
-context — are what turn "this BAM does not load" into a support thread.
+This layer retries nothing: a failed range read surfaces as an error, and the
+reader decides. What the layer owes in exchange is an error that says what
+happened, because the default answers — a bare `TypeError`, or a status number
+with no context — are what turn "this BAM does not load" into a support thread.
 
 Three kinds of failure reach a caller.
 
@@ -21,14 +21,14 @@ to do about it.
   tolerated only when the request started at 0, where the body genuinely covers
   the requested bytes, **and only for as much of it as the range asked for**.
   That second half is about memory rather than offsets: reading a body allocates
-  all of it, so a `stat()` of a 100 GB BAM on a server with no range support
-  used to allocate 100 GB to learn one number, and every 256 KiB read allocated
-  it again. The body is now read under a ceiling and the request fails the
-  moment it goes past, so this message arrives instead of the process dying of
-  memory. A file that really is shorter than the request still passes, since the
-  whole of it _is_ the range — the ceiling is at least one 256 KiB chunk,
-  because the size probe asks for a single byte and every file is bigger than
-  that.
+  all of it, so on a server with no range support, an unbounded read of a 100 GB
+  BAM would allocate 100 GB to learn one number, and every 256 KiB read would
+  allocate it again. The body is read under a ceiling instead, and the request
+  fails the moment it goes past, so this message arrives instead of the process
+  dying of memory. A file that really is shorter than the request still passes,
+  since the whole of it _is_ the range — the ceiling is at least one 256 KiB
+  chunk, because the size probe asks for a single byte and every file is bigger
+  than that.
 
   The ceiling is measured against the bytes, not against `Content-Length`. That
   header counts what is on the wire, so a `Content-Encoding` makes it the
@@ -61,8 +61,8 @@ Chrome, `Load failed` in Safari,
 headers and no URL. The browser withholds the difference deliberately: an error
 that named the cause would itself be a cross-origin read.
 
-So the hint names the two that are checkable from inside the page, and then the
-one that is left:
+The hint names the two that are checkable from inside the page, and then the one
+that is left:
 
 1. `navigator.onLine === false` — the browser reports no network connection. The
    comparison is against `false` rather than a falsy test because node has had a

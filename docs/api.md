@@ -47,7 +47,7 @@ Still cached, one layer lower: a string URL plus a single-range
 synthetic 206. Anything else — a `Request` object, an open-ended `bytes=100-`, a
 multi-range header, no range at all — goes straight to `RemoteFile.fetch`.
 
-So a caller that builds its own range requests gets the cache for free, and a
+A caller that builds its own range requests gets the cache for free, and a
 caller that streams a whole file is unaffected.
 
 Two differences from `RemoteFile.fetch` on the cached path. A status the range
@@ -109,7 +109,7 @@ empty with nothing said.
 
 ## `new CachedFilehandle(inner, key)`
 
-The same cache in front of any `GenericFilehandle` — a `LocalFile`, a
+The chunk cache sits in front of any `GenericFilehandle` — a `LocalFile`, a
 `BlobFile`, or your own implementation. Nothing in the cache is about HTTP.
 
 ```js

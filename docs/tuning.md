@@ -54,9 +54,9 @@ re-read and a re-download once those caches expire. Matching their three minutes
 meant expiring at the exact moment this became the only thing helping: measured,
 a reader who stepped away for four minutes re-downloaded all 73.5 MB of a pan.
 
-Fifteen rather than forever because forever is what this used to be, and what
-the sweep exists to end — 100 MB per worker, resident after the track closed,
-after the tab hid, and after four minutes idle.
+The sweep exists because holding every chunk forever left 100 MB per worker
+resident after the track closed, after the tab hid, and after four minutes idle.
+Fifteen minutes bounds that without forever's cost.
 
 The sweep runs on an interval of a quarter of the timeout, so the lag between a
 chunk going idle and being dropped is ~1.25x it rather than 2x. It starts with
@@ -78,10 +78,10 @@ read. Mostly for tests, which need each case to start empty.
 `fetch` resolves when the response headers arrive, and the deadline is cleared
 there, before a byte of the body is read.
 
-That distinction is load-bearing rather than fussy, because this layer makes
-range requests unusually large — 6.5 MiB for a single 4 kb viewport over a 2000x
-BAM. A deadline over the whole transfer would cut that read off on any link
-slower than about 2 Mbps, turning a slow session into a broken one.
+That distinction is necessary, not fussy, because this layer makes range
+requests unusually large — 6.5 MiB for a single 4 kb viewport over a 2000x BAM.
+A deadline over the whole transfer would cut that read off on any link slower
+than about 2 Mbps, turning a slow session into a broken one.
 
 What it catches is the one failure that produces no error at all: a connection
 that is open and silent. Nothing looks wrong from the reader's point of view — a
@@ -111,9 +111,10 @@ workers get their own, and so does each worker thread in node. The 256 MB bound
 is per instance, so a browser with six worker threads has a ceiling of 1.5 GB
 and no single place that knows it.
 
-That is the shape jbrowse has, and every number above was chosen for it: a
-browser session panning a track, where the same person reads the same region
-again a minute later and 256 MB of a device's memory is a reasonable ask.
+This per-realm scoping is the shape jbrowse has, and every number above was
+chosen for it: a browser session panning a track, where the same person reads
+the same region again a minute later and 256 MB of a device's memory is a
+reasonable ask.
 
 Two other shapes are worth thinking about before taking the defaults.
 

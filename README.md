@@ -39,7 +39,7 @@ import { LocalFile } from 'generic-filehandle2'
 const file = new CachedFilehandle(new LocalFile(path), `file://${path}`)
 ```
 
-## What it does
+## Behavior
 
 <img src="docs/img/chunks.svg" alt="A read spanning five 256 KiB chunks: one is cached, one is already being fetched by another read, and the three that are missing become two range requests" width="660">
 
@@ -62,12 +62,13 @@ ones that read sent. [CONTRIBUTING.md](CONTRIBUTING.md#docs) says how.
 - Names a cause on failure: CORS, mixed content, a server ignoring the Range
   header, a connection that goes 30s without answering.
 
-Nothing is retried, and **nothing puts a clock on a transfer**. This layer
-coalesces a run of chunks into one request, so a large one is the normal case,
-and any duration limit would cut off a slow download rather than a broken one —
-`fetch` [has no timeout of its own](https://github.com/whatwg/fetch/issues/951)
-for the same reason. The way to stop a read is the `AbortSignal` you passed it,
-which is carried to the socket.
+This layer never retries a request, and **it never puts a clock on a transfer**.
+It coalesces a run of chunks into one request, so a large one is the normal
+case, and any duration limit would cut off a slow download rather than a broken
+one — `fetch`
+[has no timeout of its own](https://github.com/whatwg/fetch/issues/951) for the
+same reason. The way to stop a read is the `AbortSignal` you passed it, which is
+carried to the socket.
 
 Requests are capped per origin rather than per process so that one unresponsive
 server cannot starve the others — the
@@ -119,9 +120,9 @@ in the process. What each was measured against is in `src/constants.ts` and in
 
 ## The layer above
 
-This caches bytes. Every parser that reads through it caches what it parsed out
-of them, on its own budget and its own idle timeout, and that cache is the one
-that decides whether a read reaches this layer at all:
+This layer caches bytes. Every parser that reads through it caches what it
+parsed out of them, on its own budget and its own idle timeout, and that cache
+is the one that decides whether a read reaches this layer at all:
 
 - [@gmod/bam](https://github.com/GMOD/bam-js) —
   [caching.md](https://github.com/GMOD/bam-js/blob/main/docs/caching.md)
