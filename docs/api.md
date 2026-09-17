@@ -47,8 +47,8 @@ Still cached, one layer lower: a string URL plus a single-range
 synthetic 206. Anything else — a `Request` object, an open-ended `bytes=100-`, a
 multi-range header, no range at all — goes straight to `RemoteFile.fetch`.
 
-A caller that builds its own range requests is cached automatically, and a
-caller that streams a whole file is unaffected.
+The cache therefore covers a caller that builds its own range requests, and
+leaves a caller that streams a whole file unaffected.
 
 Two differences from `RemoteFile.fetch` on the cached path. A status the range
 machinery cannot read as the bytes that were asked for **throws** rather than
