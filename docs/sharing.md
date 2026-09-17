@@ -1,7 +1,7 @@
 # Sharing a request between readers
 
-Two reads that need the same 256 KiB chunk issue one request. That is easy to
-say and most of the subtlety in this package, because the moment a request is
+Two reads that need the same 256 KiB chunk issue one request — the simple part.
+Most of this package's subtlety follows from that: the moment a request is
 shared, one reader's `AbortSignal` is a decision about somebody else's bytes.
 
 The rule the code implements: **the unit of fetching is a run, the unit of
@@ -14,10 +14,10 @@ request. A **chunk** is one 256 KiB cell of the grid; a second read joins at
 chunk granularity, since it may want three chunks of a ten-chunk run and nothing
 else. A **reader** is one call to `read()`, with at most one signal.
 
-The reference count lives on the run: a request maps to one run, and every chunk
-the run produces points back at it. `RunState` holds the set of signals still
-waiting, an `AbortController` the request actually runs under, and a second
-controller used only to take the listeners back off.
+The reference count is kept on the run: a request maps to one run, and every
+chunk the run produces points back at it. `RunState` holds the set of signals
+still waiting, an `AbortController` the request actually runs under, and a
+second controller used only to take the listeners back off.
 
 The request runs under the run's own signal, never the opening reader's. A
 shared request has to outlive any one reader giving up, and handing `fetch` the
@@ -73,8 +73,8 @@ them would pin each reader's `AbortController` behind a request that is over.
 A settled run is still joinable for its bytes but not for its count: `putCached`
 runs after `settle`, so there is a window where the bytes have arrived and the
 chunk is in neither the cache nor the in-flight map, and the promise is still
-the right thing to await. Adding a signal to a settled run's set is what must
-not happen — nothing would ever take it out.
+the right thing to await. A signal must never be added to a settled run's set —
+nothing would ever take it out.
 
 ## Concurrency
 
@@ -101,10 +101,10 @@ reads reach 40 concurrent against a cap of 20.
 A run whose readers have all given up comes out of the queue rather than waiting
 for a slot it no longer wants. Nothing else would take it out: the response
 deadline starts once the slot is claimed and a request goes out, so behind a
-wedged origin a queued read waited forever and ignored its caller's abort. The
-waiter is spliced out rather than left behind as a resolver that does nothing —
-`runNext` claims a slot _before_ it resumes whatever it shifts, so a no-op
-waiter would take a slot out of the pool for good.
+wedged origin a queued read waited forever, unaffected by its caller's abort.
+The waiter is spliced out rather than left behind as a resolver that does
+nothing — `runNext` claims a slot _before_ it resumes whatever it shifts, so a
+no-op waiter would take a slot out of the pool for good.
 
 ## What the URL key does and does not separate
 

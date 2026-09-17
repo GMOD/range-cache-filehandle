@@ -1,9 +1,9 @@
 # Failing legibly
 
-This layer retries nothing: a failed range read surfaces as an error, and the
-reader decides. What the layer owes in exchange is an error that says what
-happened, because the default answers — a bare `TypeError`, or a status number
-with no context — are what turn "this BAM does not load" into a support thread.
+This layer retries nothing: a failed range read becomes an error, and the reader
+decides. What the layer owes in exchange is an error that reports what happened,
+because the default answers — a bare `TypeError`, or a status number with no
+context — are what turn "this BAM does not load" into a support thread.
 
 Three kinds of failure reach a caller.
 
@@ -17,18 +17,18 @@ to do about it.
   servers do this rather than clamping a range whose end runs past EOF. The body
   then starts at byte 0, but callers slice it at the offsets they asked for, so
   every chunk past the first would be filled with data from the wrong position —
-  silently, surfacing much later as something like `invalid bgzf header`. It is
+  silently, showing up much later as something like `invalid bgzf header`. It is
   tolerated only when the request started at 0, where the body genuinely covers
   the requested bytes, **and only for as much of it as the range asked for**.
   That second half is about memory rather than offsets: reading a body allocates
-  all of it, so on a server with no range support, an unbounded read of a 100 GB
-  BAM would allocate 100 GB to learn one number, and every 256 KiB read would
-  allocate it again. The body is read under a ceiling instead, and the request
-  fails the moment it goes past, so this message arrives instead of the process
-  dying of memory. A file that really is shorter than the request still passes,
-  since the whole of it _is_ the range — the ceiling is at least one 256 KiB
-  chunk, because the size probe asks for a single byte and every file is bigger
-  than that.
+  all of it, so without a ceiling, a `stat()` of a 100 GB BAM on a server with
+  no range support would allocate 100 GB to learn one number, and every 256 KiB
+  read would allocate it again. The body is read under a ceiling instead, and
+  the request fails the moment it goes past, so this message arrives instead of
+  the process dying of memory. A file that really is shorter than the request
+  still passes, since the whole of it _is_ the range — the ceiling is at least
+  one 256 KiB chunk, because the size probe asks for a single byte and every
+  file is bigger than that.
 
   The ceiling is measured against the bytes, not against `Content-Length`. That
   header counts what is on the wire, so a `Content-Encoding` makes it the
@@ -36,8 +36,8 @@ to do about it.
   `Content-Length` is, so cross-origin the browser hides exactly the header that
   would have said the number was unusable. Trusting it recorded a gzipped file's
   compressed size as the size of the file. A chunked body, which is what nginx
-  sends the moment it gzips, declares no length at all. Only the bytes know how
-  many there are.
+  sends the moment it gzips, declares no length at all. Only counting the bytes
+  gives the real number.
 
 - **401 / 403** — the file is there and the request was refused. A signed URL
   may have expired, or a bucket policy may not grant read to the page origin.
@@ -75,14 +75,14 @@ that is left:
    `Access-Control-Allow-Origin`, and
    `Access-Control-Expose-Headers: Content-Range` as well or the size of the
    file cannot be read either. A host that is down, a DNS failure and a blocked
-   port look identical from here, and the message says so.
+   port look identical from here, so the message does not pick one.
 
 Detecting this at all takes walking the `cause` chain rather than checking the
 rejection's class: `RemoteFile.fetch` catches the `TypeError` first and rethrows
 a plain `Error` wrapping it (and, on Chrome's exact "Failed to fetch" wording,
 retries once through the cache to work around a Chrome CORS-cache bug). By the
 time it gets here the class is gone and the chain is the only thing that still
-says what it was. The walk is depth-bounded, since a cause chain is not
+shows what it was. The walk is depth-bounded, since a cause chain is not
 guaranteed acyclic.
 
 One guard on top: the hint is suppressed when the deadline signal aborted, so an
@@ -109,9 +109,10 @@ one, which is also how you can tell which of the two you are looking at.
 ## The one that succeeds and still fails
 
 `stat()` throws rather than returning `size: 0` when the request came back fine
-but no `Content-Range` carrying a length came with it. Returning zero is a lie
-that tends to make downstream callers issue zero-byte reads or treat the file as
-empty, and the failure then surfaces nowhere near its cause.
+but no `Content-Range` carrying a length came with it. Returning zero
+misrepresents the failure, tending to make downstream callers issue zero-byte
+reads or treat the file as empty, and the failure then appears nowhere near its
+cause.
 
 The usual cause is the one CORS misconfiguration invisible from the network tab:
 the header is on the wire and the browser will not let the page read it. The
@@ -125,10 +126,11 @@ in a `try`/`catch`.
 
 A range response is checked against its `Content-Range`: the header has to
 describe a real range of a file that size, it has to be the range that was asked
-for, and the body has to be as long as it says and reach either the end asked
-for or the end of the file. A body shorter than the range it claims is what that
-last pair is for — nothing downstream can tell a truncated response from the end
-of the file, since a short chunk _is_ how this package represents EOF.
+for, and the body has to be as long as the header declares and reach either the
+end asked for or the end of the file. A body shorter than the range it claims is
+what that last pair is for — nothing downstream can tell a truncated response
+from the end of the file, since a short chunk _is_ how this package represents
+EOF.
 
 The length half of that is also a ceiling on what gets held: a body is read only
 as far as the range the header declared, so a proxy that answers a 256 KiB
@@ -136,7 +138,7 @@ request with an honest `Content-Range` and then streams the whole file is
 stopped at the ceiling rather than allocated in full and rejected afterwards.
 
 **A `Content-Encoding` puts the length half of that out of reach.** The bytes on
-the wire are then not the bytes of the range, so their count says nothing, and
+the wire are then not the bytes of the range, so their count means nothing, and
 the two length checks are skipped. The header checks still run — a response that
 contradicts itself, or that describes some other range, is rejected however it
 is encoded — but a proxy that truncates an encoded body has nothing left to
@@ -151,6 +153,6 @@ one host and not another, compare `Content-Encoding` on the range responses.
 
 A `read()` with a `NaN` length or position throws a `TypeError` naming the file,
 rather than becoming a `bytes=NaN-NaN` request. It arrives from a corrupt or
-truncated index, and the message says so. The same guard covers a negative or
-fractional offset, a length past what a `Uint8Array` can hold, and a `Range`
-header handed to `fetch()` asking for any of those.
+truncated index, and the message names the cause. The same guard covers a
+negative or fractional offset, a length past what a `Uint8Array` can hold, and a
+`Range` header handed to `fetch()` asking for any of those.

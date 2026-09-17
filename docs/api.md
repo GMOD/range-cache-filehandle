@@ -47,15 +47,15 @@ Still cached, one layer lower: a string URL plus a single-range
 synthetic 206. Anything else — a `Request` object, an open-ended `bytes=100-`, a
 multi-range header, no range at all — goes straight to `RemoteFile.fetch`.
 
-A caller that builds its own range requests gets the cache for free, and a
+A caller that builds its own range requests is cached automatically, and a
 caller that streams a whole file is unaffected.
 
 Two differences from `RemoteFile.fetch` on the cached path. A status the range
 machinery cannot read as the bytes that were asked for **throws** rather than
-coming back as a `Response` to inspect — the status hints in
-[errors.md](errors.md) are what that buys, and the uncached path still returns
-its `Response` for any status. And the synthetic 206 carries the bytes, not the
-headers: no `Content-Range`, no `Content-Length`. Read the size with `stat()`.
+coming back as a `Response` to inspect — [errors.md](errors.md) has the status
+hints this makes possible, and the uncached path still returns its `Response`
+for any status. And the synthetic 206 carries the bytes, not the headers: no
+`Content-Range`, no `Content-Length`. Read the size with `stat()`.
 
 ### `stat()`
 
@@ -128,14 +128,14 @@ past-EOF reads clamp); `readFile` and `close` pass through untouched, and
 
 Delegating rather than returning `key` is deliberate, and the `Blob` case is
 why. A key is invented where there is no name; `source` is an address someone
-can go and look at, so a wrapper around a `Blob` reports `undefined` and a
-caller naming a slow read says nothing rather than showing an id it made up.
+can go and look at, so a wrapper around a `Blob` reports `undefined`, and a
+slow-read log shows nothing rather than an id it made up.
 
-Worth knowing that a local file may not want this at all. The cache buys request
-coalescing, and a `LocalFile` read is a positional read on an already-open
-descriptor — there is no request to coalesce. What it still buys is the reuse: a
-re-read of a region already in the grid does no syscall, at a cost of 256 KiB
-resident per touched region.
+Worth knowing that a local file may not need this at all. The cache provides
+request coalescing, and a `LocalFile` read is a positional read on an
+already-open descriptor — there is no request to coalesce. It still helps with
+reuse: a re-read of a region already in the grid does no syscall, at a cost of
+256 KiB resident per touched region.
 
 ## `sweepIdleCache()`
 
@@ -171,9 +171,9 @@ a server that never answers at all is still covered by `RESPONSE_TIMEOUT_MS`.
 
 ## `clearCacheFor(key)`
 
-Drop one file's cached chunks and its known size, leaving every other file
-alone. What a consumer closing one track wants, where `clearCache()` is too
-blunt. The key is the same one the file was opened with — the URL for a
+Drop one file's cached chunks and its known size, leaving every other file alone
+— what a consumer closing one track needs, where `clearCache()` is too blunt.
+The key is the same one the file was opened with — the URL for a
 `RemoteFileWithRangeCache`, the second constructor argument for a
 `CachedFilehandle`.
 

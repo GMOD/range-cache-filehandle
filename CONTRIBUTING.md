@@ -43,8 +43,8 @@ dot -Tsvg docs/img/dataflow.dot -o docs/img/dataflow.svg
 Both `architecture.svg` and `dataflow.svg` are committed and unchecked, because
 graphviz is not a dependency and different versions emit different SVG bytes — a
 staleness check on them would fail on toolchain drift rather than on a stale
-diagram. `pnpm diagrams` re-renders `architecture.svg` where graphviz exists and
-says so where it does not.
+diagram. `pnpm diagrams` re-renders `architecture.svg` where graphviz exists,
+and prints a message where it does not.
 
 ## Publishing
 
@@ -58,5 +58,5 @@ npm >=11.10.0 and 2FA).
 
 Once npm publish succeeds, the `release` job creates the GitHub release for the
 tag, taking its notes from that version's CHANGELOG.md section — which
-`scripts/release-notes.sh` extracts, so run that with a version to preview what
-a release will say.
+`scripts/release-notes.sh` extracts, so run that with a version to preview the
+notes a release will carry.

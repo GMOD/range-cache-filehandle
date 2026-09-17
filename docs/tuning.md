@@ -49,14 +49,15 @@ all default to three minutes
 This layer holds for fifteen.
 
 Raw compressed bytes cost roughly an order of magnitude less per unit of genomic
-coverage than the parsed features above them, and they are what stands between a
-re-read and a re-download once those caches expire. Matching their three minutes
-meant expiring at the exact moment this became the only thing helping: measured,
-a reader who stepped away for four minutes re-downloaded all 73.5 MB of a pan.
+coverage than the parsed features above them, and once those caches expire,
+nothing but this cache separates a re-read from a re-download. Matching their
+three minutes meant expiring at the exact moment this became the only thing
+helping: measured, a reader who stepped away for four minutes re-downloaded all
+73.5 MB of a pan.
 
 The sweep exists because holding every chunk forever left 100 MB per worker
 resident after the track closed, after the tab hid, and after four minutes idle.
-Fifteen minutes bounds that without forever's cost.
+Fifteen minutes bounds that without the cost of holding chunks forever.
 
 The sweep runs on an interval of a quarter of the timeout, so the lag between a
 chunk going idle and being dropped is ~1.25x it rather than 2x. It starts with
@@ -66,9 +67,9 @@ does not reach it where it matters: workers are not throttled, and the workers
 are where the bytes are.
 
 `sweepIdleCache()` is exported so a consumer can reclaim on its own schedule — a
-tab going hidden, say. The interval is still what makes it work for the case it
-exists for, since an idle consumer is calling nothing and a lazy check inside
-the cache would never fire for exactly the reader who walked away.
+tab going hidden, say. The interval still matters for the case it targets: an
+idle consumer calls nothing, and a lazy check inside the cache would never fire
+for exactly the reader who walked away.
 
 `clearCache()` is the bigger hammer: every chunk, every known size, every queued
 read. Mostly for tests, which need each case to start empty.
@@ -100,7 +101,7 @@ return or throw; there is no socket there to sit open on.
 
 The deadline is composed with the caller's signal, never substituted for it —
 replacing it would take cancellation back off the socket, which is the ~6.5 MiB
-per cancelled navigation that reference counting exists to preserve
+per cancelled navigation that reference counting preserves
 ([sharing.md](sharing.md)).
 
 ## Where this runs
@@ -109,14 +110,15 @@ The cache is module state, so its scope is one module instance: **one per
 realm**, not one per process and not one per filehandle. A page and each of its
 workers get their own, and so does each worker thread in node. The 256 MB bound
 is per instance, so a browser with six worker threads has a ceiling of 1.5 GB
-and no single place that knows it.
+and no single place that tracks the total.
 
-This per-realm scoping is the shape jbrowse has, and every number above was
-chosen for it: a browser session panning a track, where the same person reads
-the same region again a minute later and 256 MB of a device's memory is a
-reasonable ask.
+Every number above was chosen for this per-realm scoping, the way jbrowse
+deploys it: a browser session panning a track, where the same person reads the
+same region again a minute later and 256 MB of a device's memory is a reasonable
+ask.
 
-Two other shapes are worth thinking about before taking the defaults.
+Two other deployment patterns are worth thinking about before taking the
+defaults.
 
 **A long-lived server process** shares one cache across every request it serves,
 keyed by URL. That is a real win when many requests hit the same few files, and
@@ -130,13 +132,12 @@ There is no per-file bound and no per-tenant one. One large file can fill the
 cache and evict every chunk of every other, which in a browser is the point (the
 user is looking at one track) and on a shared server may not be.
 
-**A short script** — read a file once, write something out, exit — wants none of
-this and pays little for it: the chunks it caches are ones it will not read
+**A short script** — read a file once, write something out, exit — needs none of
+this and costs little for it: the chunks it caches are ones it will not read
 again, and the ceiling caps the waste at 256 MB. Both timers are `unref`'d, so
 neither the sweep interval nor a pending response deadline holds the process
 open; a script that finishes exits without calling anything.
 
 **A `LocalFile` under `CachedFilehandle`** is the case to think twice about. See
 [api.md](api.md#new-cachedfilehandleinner-key) — there is no request to coalesce
-there, so the only thing bought is reuse, at 256 KiB resident per touched
-region.
+there, so the only benefit is reuse, at 256 KiB resident per touched region.

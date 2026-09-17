@@ -42,7 +42,7 @@ Planning runs in one synchronous pass, so two reads in the same tick cannot open
 two requests for one chunk. A read that needs a chunk already in flight joins
 the request fetching it. The request stays alive until every reader waiting on
 it aborts, so a pan that cancels one query keeps a request another query still
-wants. [sharing.md](sharing.md) covers the reference counting and the three
+needs. [sharing.md](sharing.md) covers the reference counting and the three
 cases around it.
 
 ## A cache hit skips the `Response` round trip
@@ -63,10 +63,10 @@ stayed cached, so evicting a chunk would free nothing. The copy makes the
 
 `@gmod/bam`, `@gmod/cram` and `@gmod/tabix` drop parsed records after three
 minutes idle. This layer keeps compressed chunks for fifteen, because they cost
-roughly an order of magnitude less memory per base of coverage and they are all
-that stands between a re-read and a re-download once the parsed cache expires.
-With a three-minute timeout, a reader who stepped away for four minutes
-re-downloaded all 73.5 MB of a pan.
+roughly an order of magnitude less memory per base of coverage, and once the
+parsed cache expires, nothing else separates a re-read from a re-download. With
+a three-minute timeout, a reader who stepped away for four minutes re-downloaded
+all 73.5 MB of a pan.
 [tuning.md](tuning.md#cache_idle_timeout_ms-is-longer-than-the-caches-above-it-deliberately)
 has the rest.
 

@@ -65,8 +65,8 @@ request this way.
 ## Fetching
 
 Each run goes through `limitConcurrency` — at most 20 requests in flight for any
-one origin, the rest queued — and then to the underlying source, which is the
-only part of this package that knows what the source is.
+one origin, the rest queued — and then to the underlying source: the only part
+of this package that distinguishes what kind of source it is.
 `RemoteFileWithRangeCache` sets a range header and calls `fetch`;
 `CachedFilehandle` calls `read` on whatever it wraps.
 
@@ -110,11 +110,11 @@ for no reuse.
 
 ## What is not here
 
-This layer retries nothing: a failed range read surfaces as an error, and the
-reader decides — what it says and how it decides is [errors.md](errors.md).
+This layer retries nothing: a failed range read becomes an error, and the reader
+decides — what it reports and how it decides is [errors.md](errors.md).
 
 There is no per-byte progress. Range reads return a fully-assembled in-memory
-`Response`, so `generic-filehandle2`'s streaming `onProgress` sees the whole
+`Response`, so `generic-filehandle2`'s streaming `onProgress` receives the whole
 buffer at once and reports 0→100 instantly. The indexed parsers self-report at
 block granularity from their index metadata, which is the meaningful unit and
 also reflects cache hits.
