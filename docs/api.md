@@ -125,13 +125,6 @@ something instance-unique for a `Blob`, which has none. Two wrappers sharing a
 key share chunks — right for two handles on one path, wrong for two unrelated
 blobs.
 
-Before its first read, each handle calls `inner.stat()` once. When the stats
-carry `mtimeMs`, as a `LocalFile`'s do, the handle keeps its chunks and size
-under `<key>@<ino>:<mtimeMs>:<size>`, so a handle opened after the file is
-rewritten in place reads the new bytes rather than the old chunks. Two handles
-on an unchanged file still share chunks. A `BlobFile`, a `RemoteFile`, or an
-inner handle whose `stat()` rejects keeps `key` as given.
-
 `read` and `stat` go through the cache; `readFile` and `close` pass through
 untouched, and `source` delegates. A size from `stat` is recorded so past-EOF
 reads clamp, except a size of 0 from stats without `mtimeMs`: a `RemoteFile`
@@ -185,8 +178,7 @@ Drop one file's cached chunks and its known size, leaving every other file alone
 — what a consumer closing one track needs, where `clearCache()` is too blunt.
 The key is the same one the file was opened with — the URL for a
 `RemoteFileWithRangeCache`, the second constructor argument for a
-`CachedFilehandle`. That key also clears a `CachedFilehandle` whose chunks live
-under a key carrying the file's inode, modification time and size.
+`CachedFilehandle`.
 
 Like `clearCache`, it does not cancel work in flight: a read still waiting on a
 request is entitled to the bytes it asked for, and that request cleans up after

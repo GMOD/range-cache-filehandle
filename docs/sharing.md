@@ -133,17 +133,8 @@ it.
 ## A local file rewritten in place
 
 A path names a location, not a set of bytes. Rewrite a file in place and a new
-`CachedFilehandle` on the same `file://` key would read the old file's cached
-chunks, and a cached short chunk would read as end-of-file, so even an explicit
-`stat()` could not set it right.
-
-Each `CachedFilehandle` therefore asks its inner handle for `stat()` once,
-before its first read. Where the stats carry `mtimeMs`, the handle keeps its
-chunks, in-flight requests and size under `<key>@<ino>:<mtimeMs>:<size>`. A
-handle opened after the rewrite misses the old chunks, which idle out, while two
-handles on an unchanged file resolve the same key and share as before. A handle
-already open across a rewrite keeps the identity it resolved.
-
-Stats without `mtimeMs` — a `BlobFile`'s, a `RemoteFile`'s — leave the caller's
-key as it is, and so does a `stat()` that rejects. `clearCacheFor` takes the
-caller's key in every case and clears the versioned keys built from it.
+`CachedFilehandle` on the same `file://` key reads the old file's cached chunks,
+and a cached short chunk reads as end-of-file. The cache does not stat the file
+to notice, because that would cost every handle a round trip before its first
+read. A caller that rewrites files either puts the modification time in the key
+or calls `clearCacheFor(key)` before reopening.
