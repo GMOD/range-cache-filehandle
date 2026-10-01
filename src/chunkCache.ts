@@ -19,6 +19,8 @@ import {
 } from './constants.ts'
 import { copyChunkInto, unrefIfPossible } from './util.ts'
 
+import type { Stats } from 'generic-filehandle2'
+
 interface ChunkRun {
   start: number
   end: number
@@ -307,8 +309,9 @@ function markStale(entries: Iterable<InFlightChunk>) {
  * Drop one file's cached chunks and its size, leaving every other file alone.
  *
  * What a consumer closing one track wants, and what {@link clearCache} is too
- * blunt for. Chunk keys are prefixed with the file key, so this is a scan of the
- * cache — bounded by {@link MAX_CACHE_ENTRIES}, and only on an explicit call.
+ * blunt for. `key` is the one the file was opened with, and it also clears
+ * every {@link versionedKey} built from it. This is a scan of the cache —
+ * bounded by {@link MAX_CACHE_ENTRIES}, and only on an explicit call.
  *
  * Deliberately does not *cancel* in-flight requests: a read still waiting on one
  * is entitled to its bytes, and its own cleanup removes it. What those requests
@@ -326,25 +329,53 @@ export function clearCacheFor(key: string) {
       entry.run.stale = true
     }
   }
-  sizeCache.delete(key)
+  for (const sizeKey of sizeCache.keys()) {
+    if (isKeyOf(sizeKey, key)) {
+      sizeCache.delete(sizeKey)
+    }
+  }
   if (cache.size === 0) {
     stopSweep()
   }
 }
 
+const VERSION_SUFFIX = /^@\d*:\d+(?:\.\d+)?:\d+$/
+
+/**
+ * The key a file's chunks, in-flight entries and size live under:
+ * `<key>@<ino>:<mtimeMs>:<size>` when its stats carry a modification time, so
+ * a handle opened after the file is rewritten misses the old chunks. Without
+ * one, or with stats that do not fit the suffix {@link clearCacheFor}
+ * recognises, it is `key` unchanged.
+ */
+export function versionedKey(key: string, stats: Stats) {
+  if (stats.mtimeMs === undefined) {
+    return key
+  }
+  const suffix = `@${stats.ino ?? ''}:${stats.mtimeMs}:${stats.size}`
+  return VERSION_SUFFIX.test(suffix) ? key + suffix : key
+}
+
+function isKeyOf(fileKey: string, key: string) {
+  return (
+    fileKey === key ||
+    (fileKey.startsWith(`${key}@`) &&
+      VERSION_SUFFIX.test(fileKey.slice(key.length)))
+  )
+}
+
 /**
  * Whether `chunkKey` is one of `key`'s chunks.
  *
- * The suffix has to be checked, not just the prefix. Keys with colons in them
- * are ordinary — a `host:port` URL, an S3 object name carrying a timestamp, a
- * `blob:` key — and `startsWith(`${key}:`)` alone also matches every chunk of
- * any key that merely *begins* with this one: measured, `clearCacheFor` on
- * `https://h/a` evicted the chunks of `https://h/a:2024` too.
+ * Matched on the whole file key, not a prefix: keys with colons in them are
+ * ordinary — a `host:port` URL, an S3 object name carrying a timestamp — and a
+ * prefix match on `https://h/a` also takes the chunks of `https://h/a:2024`.
  */
 function isChunkOf(chunkKey: string, key: string) {
+  const colon = chunkKey.lastIndexOf(':')
   return (
-    chunkKey.startsWith(`${key}:`) &&
-    /^\d+$/.test(chunkKey.slice(key.length + 1))
+    /^\d+$/.test(chunkKey.slice(colon + 1)) &&
+    isKeyOf(chunkKey.slice(0, colon), key)
   )
 }
 
@@ -931,7 +962,10 @@ export async function getCachedRange(
  * Await `promise`, but reject with the reader's own reason as soon as `signal`
  * aborts: a shared run keeps going while anyone else wants it.
  */
-function waitAsCaller<T>(promise: Promise<T>, signal: AbortSignal | undefined) {
+export function waitAsCaller<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+) {
   if (!signal) {
     return promise
   }

@@ -1,4 +1,9 @@
-import { getCachedRange, recordSize } from './chunkCache.ts'
+import {
+  getCachedRange,
+  recordSize,
+  versionedKey,
+  waitAsCaller,
+} from './chunkCache.ts'
 import { assertReadArgs } from './util.ts'
 
 import type {
@@ -21,13 +26,17 @@ import type {
  * identify the underlying bytes: a path or a URL for something with a stable
  * name, and something instance-unique for a Blob, which has no name to key on.
  * Two wrappers sharing a key share chunks, which is right for two handles on
- * one path and wrong for two unrelated blobs.
+ * one path and wrong for two unrelated blobs. Where the inner handle's stats
+ * carry a modification time, each handle narrows `key` once to a
+ * {@link versionedKey}, so a file rewritten in place is a different file.
  */
 export class CachedFilehandle implements GenericFilehandle {
   // explicit fields rather than constructor parameter properties, which node's
   // type stripper cannot erase — `erasableSyntaxOnly` bans them
   private inner: GenericFilehandle
   private key: string
+  private resolvedKey?: string
+  private identity?: Promise<string>
 
   /**
    * The wrapped handle's address, **not** `key`. The two differ exactly where it
@@ -55,8 +64,9 @@ export class CachedFilehandle implements GenericFilehandle {
     if (length === 0) {
       return new Uint8Array(0)
     }
+    const key = this.resolvedKey ?? (await this.resolveKey(opts.signal))
     return getCachedRange(
-      this.key,
+      key,
       position,
       length,
       opts.signal ? { signal: opts.signal } : undefined,
@@ -87,10 +97,28 @@ export class CachedFilehandle implements GenericFilehandle {
   // `Stats` from the inferred type and fails the build (TS2883)
   async stat(): Promise<Stats> {
     const stats = await this.inner.stat()
-    // lets getCachedRange clamp reads that run past EOF, which every bgzf
-    // reader does by construction on its last block
-    recordSize(this.key, stats.size)
+    this.adopt(stats)
     return stats
+  }
+
+  private resolveKey(signal: AbortSignal | undefined) {
+    signal?.throwIfAborted()
+    this.identity ??= this.inner.stat().then(
+      stats => this.adopt(stats),
+      () => (this.resolvedKey ??= this.key),
+    )
+    return waitAsCaller(this.identity, signal)
+  }
+
+  // A `RemoteFile` answers `{ size: 0 }` when it cannot see Content-Range, and
+  // recording that would empty every read, so a zero size needs a source that
+  // also reports a modification time before it counts.
+  private adopt(stats: Stats) {
+    const key = versionedKey(this.key, stats)
+    if (stats.size > 0 || stats.mtimeMs !== undefined) {
+      recordSize(key, stats.size)
+    }
+    return (this.resolvedKey ??= key)
   }
 
   close() {
