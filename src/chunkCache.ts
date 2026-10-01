@@ -263,21 +263,16 @@ function stopSweep() {
 // ---------------------------------------------------------------------------
 
 /**
- * Drop every cached chunk, every known size and every queued read.
+ * Drop every cached chunk and every known size.
  *
  * Mostly for tests, which need each case to start from an empty cache, and for a
  * consumer that knows it is finished with everything it has opened. To reclaim
  * one file rather than all of them, see {@link clearCacheFor}.
  *
- * Deliberately leaves each pool's `active` count alone. Resetting it is the bug
- * this cache had — assigning over a count of work that is genuinely still
- * running lets the next reads overshoot the cap, measured at forty concurrent
- * against a limit of twenty — and dropping the pools outright has the same
- * effect by another route, since the leaked work then decrements a pool nothing
- * consults. So a file whose transfer has wedged mid-body stays wedged across a
- * clear, which is the honest cost of putting no clock on a transfer; see
- * {@link MAX_CONCURRENT}. It is one file rather than the process, and a server
- * that never answers at all is still covered by {@link RESPONSE_TIMEOUT_MS}.
+ * Leaves the concurrency pools alone. Reads in flight or queued for a slot are
+ * marked stale and settle in turn as slots free; resetting or bypassing a pool
+ * would let the next reads overshoot {@link MAX_CONCURRENT}. A transfer wedged
+ * mid-body therefore stays wedged across a clear.
  */
 export function clearCache() {
   cache = new Map<string, CacheEntry>()
@@ -291,7 +286,6 @@ export function clearCache() {
   // would still repopulate the cache, though, which is what stale stops.
   markStale(inFlight.values())
   inFlight = new Map<string, InFlightChunk>()
-  resumeAllWaiters()
 }
 
 /**
@@ -410,31 +404,6 @@ function runNext(key: string, pool: Pool) {
 }
 
 /**
- * Resume every queued read across every pool, claiming a slot for each the way
- * {@link runNext} would.
- *
- * Queued waiters are RESUMED, not dropped: a dropped resolver strands its
- * {@link limitConcurrency} caller with no resolve and no reject, so the read
- * neither runs nor settles — a hang rather than a cancellation.
- *
- * `active` is incremented rather than assigned. Assigning it discards the count
- * of work that is genuinely still running, so the pool believes it has room it
- * does not have: measured, twenty requests in flight through a `clearCache` let
- * the next reads reach forty concurrent against a cap of twenty, and left the
- * count negative afterwards to do it again.
- */
-function resumeAllWaiters() {
-  for (const [key, pool] of pools) {
-    const waiters = pool.queue.splice(0)
-    pool.active += waiters.length
-    for (const resolve of waiters) {
-      resolve()
-    }
-    releasePool(key, pool)
-  }
-}
-
-/**
  * Wait for a slot in `pool`, giving up if `signal` aborts before one frees.
  *
  * Without the signal a queued read had no way out at all. The deadline in
@@ -448,8 +417,7 @@ function resumeAllWaiters() {
  * The waiter is spliced out of the queue rather than left in it as a resolver
  * that no longer does anything. {@link runNext} claims a slot *before* it
  * resumes whatever it shifts, so a no-op waiter would take a slot out of the
- * pool permanently — the same accounting {@link resumeAllWaiters} is careful
- * about, reached from the other direction.
+ * pool permanently.
  */
 async function waitForSlot(pool: Pool, signal: AbortSignal | undefined) {
   if (signal?.aborted) {

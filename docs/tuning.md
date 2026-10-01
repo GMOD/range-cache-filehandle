@@ -71,8 +71,9 @@ tab going hidden, say. The interval still matters for the case it targets: an
 idle consumer calls nothing, and a lazy check inside the cache would never fire
 for exactly the reader who walked away.
 
-`clearCache()` is the bigger hammer: every chunk, every known size, every queued
-read. Mostly for tests, which need each case to start empty.
+`clearCache()` is the bigger hammer: it drops every chunk and every known size,
+and leaves reads in flight or queued to finish under the concurrency cap. Mostly
+for tests, which need each case to start empty.
 
 ## `RESPONSE_TIMEOUT_MS` bounds the wait for a response, not for the bytes
 

@@ -153,21 +153,18 @@ which is one number per file and costs a round trip to re-derive.
 
 ## `clearCache()`
 
-Drop every cached chunk, every known size, and hand every queued read its slot
-so it runs. Mostly for tests, which need each case to start empty, and for a
-consumer that knows it is finished with everything it has opened.
+Drop every cached chunk and every known size. Mostly for tests, which need each
+case to start empty, and for a consumer that knows it is finished with
+everything it has opened.
 
-Note what it does **not** do: it does not cancel work in flight, and it does not
-reject queued reads. A queued read is resumed rather than dropped, because a
-dropped resolver strands its caller with neither a resolve nor a reject — a hang
-rather than a cancellation. To actually stop work, abort the signals you passed
-to it.
+`clearCache` does not cancel work in flight, reject queued reads, or touch the
+concurrency pools. A read already running or queued for a slot gets its bytes,
+settling in turn as slots free, but those bytes do not repopulate the emptied
+cache. To actually stop work, abort the signals you passed to it.
 
-It also leaves each origin's in-flight request count alone. Resetting a count of
-work that is genuinely still running is what let the reads after a `clearCache`
-reach 40 concurrent against a cap of 20, so a transfer that has wedged mid-body
-stays wedged across a clear. That is the cost of putting no clock on a transfer;
-a server that never answers at all is still covered by `RESPONSE_TIMEOUT_MS`.
+Because the pools keep their counts, a transfer that has wedged mid-body stays
+wedged across a clear. That is the cost of putting no clock on a transfer; a
+server that never answers at all is still covered by `RESPONSE_TIMEOUT_MS`.
 
 ## `clearCacheFor(key)`
 

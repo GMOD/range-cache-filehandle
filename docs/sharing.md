@@ -98,11 +98,12 @@ readers opening at once do not issue N stats outside the cap. `stat()` also goes
 through `oncePerKey`, so those N readers share one request rather than making N
 of them for one number.
 
-`clearCache` resumes queued waiters rather than dropping them. A dropped
-resolver strands its caller with no resolve and no reject — a hang rather than a
-cancellation. Each resumed waiter is _added_ to the active count, never assigned
-over it: assigning discards the count of work still running, which let the next
-reads reach 40 concurrent against a cap of 20.
+`clearCache` leaves the pools alone. A read queued for a slot when the cache is
+cleared is in-flight work like any other: the clear marks it stale, so its bytes
+do not go back into the emptied cache, and it waits its turn and settles as a
+slot frees. Dropping its resolver would strand its caller with no resolve and no
+reject, and releasing every queued read at once would put more than 20 requests
+on the wire.
 
 A run whose readers have all given up comes out of the queue rather than waiting
 for a slot it no longer wants. Nothing else would take it out: the response
