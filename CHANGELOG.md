@@ -1,3 +1,27 @@
+## [1.5.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.4.0...v1.5.0) (2026-10-01)
+
+### Bug Fixes
+
+- Release an aborted reader at once, with its own reason ([642a1ee](https://github.com/GMOD/range-cache-filehandle/commit/642a1eed4964b31e6911b9becab41281dbe5b7bb))
+- ClearCache leaves the concurrency pools alone ([b2ff987](https://github.com/GMOD/range-cache-filehandle/commit/b2ff9879dd144b28b2334a8e007f4e60cb1d6812))
+- A rewritten local file gets a fresh cache identity ([f7be375](https://github.com/GMOD/range-cache-filehandle/commit/f7be3753df01d2f5aa5000c4e8c43d3e4c57e9e5))
+- Build every request through RemoteFile.buildRequest ([c3f5935](https://github.com/GMOD/range-cache-filehandle/commit/c3f5935d06c5a2b6e39fb147f8d5892f44945f72))
+- Compose the response deadline with AbortSignal.any ([613b415](https://github.com/GMOD/range-cache-filehandle/commit/613b415f430a0539a834c2e4c569243ecaf638ff))
+- Re-arm the response deadline while the browser queues the request ([b24aaca](https://github.com/GMOD/range-cache-filehandle/commit/b24aacadfd6816d8578c8bfd9067c18eebb94041))
+- CachedFilehandle no longer stats before its first read ([67ad5a2](https://github.com/GMOD/range-cache-filehandle/commit/67ad5a23d5101596f37a26d844aa450ab7bd83ec))
+
+### Documentation
+
+- Add optimizations.md ([485eee2](https://github.com/GMOD/range-cache-filehandle/commit/485eee2015a85464d9d6b166b623b4cdb98ae734))
+- Fix anti-AI prose tropes (dramatic negation, "So"/"That" openings, changelog framing) ([d9751e0](https://github.com/GMOD/range-cache-filehandle/commit/d9751e056a31218a43008899e629f990b0510492))
+- Fix inanimate-subject agency and figures of speech, and restore a dropped detail ([9250194](https://github.com/GMOD/range-cache-filehandle/commit/92501940549d1ad9127d8344aab5895c68b13b13))
+- Name the contig-orientation rule and the cache's coverage exactly ([b04893b](https://github.com/GMOD/range-cache-filehandle/commit/b04893b4e90fbbbb442a1e7761c5722cef96e388))
+
+### Other Changes
+
+- Depend on generic-filehandle2 ^2.5.0 ([3f34895](https://github.com/GMOD/range-cache-filehandle/commit/3f3489551a765a3302d3626d9e812979095e5765))
+- Update pnpm-lock.yaml for generic-filehandle2 ^2.5.0 ([fbbf700](https://github.com/GMOD/range-cache-filehandle/commit/fbbf70042deec9ba4f6bdef72c15faa1bf222d6f))
+
 ## [1.4.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.3.0...v1.4.0) (2026-08-23)
 
 ### Bug Fixes
