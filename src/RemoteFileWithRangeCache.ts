@@ -93,19 +93,8 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     end: number,
     init?: RequestInit,
   ) {
-    const { res, deadline } = await this.fetchWithDeadline(
-      url,
-      start,
-      end,
-      init,
-    )
-    try {
-      return await this.readRange(res, url, start, end)
-    } finally {
-      // only now: until the body is read, this is what carries a caller's
-      // cancellation down to the socket
-      deadline.dispose()
-    }
+    const res = await this.fetchWithDeadline(url, start, end, init)
+    return this.readRange(res, url, start, end)
   }
 
   /** the bytes of a response, once its status and its claims check out */
@@ -181,25 +170,20 @@ export class RemoteFileWithRangeCache extends RemoteFile {
         `No response from ${url} for bytes ${start}-${end} after ${RESPONSE_TIMEOUT_MS / 1000}s (the connection was open and the server sent nothing; a transfer already under way is not subject to this limit, so this is a stalled request rather than a slow one)`,
     )
     try {
-      const res = await super.fetch(url, {
+      return await super.fetch(url, {
         ...init,
         headers,
         signal: deadline.signal,
       })
-      // the response is here; from here the body may take as long as it takes
-      deadline.responded()
-      // Deliberately not disposed here. The deadline stays linked to the
-      // caller's signal until the body has been read, because that link is what
-      // carries a cancellation down to the socket; `fetchRange` disposes it.
-      return { res, deadline }
     } catch (e) {
-      deadline.dispose()
       throw describeFetchFailure(
         e,
         deadline,
         url,
         `${url} bytes ${start}-${end}`,
       )
+    } finally {
+      deadline.stop()
     }
   }
 
@@ -280,12 +264,6 @@ export class RemoteFileWithRangeCache extends RemoteFile {
    * The deadline is safe here for exactly the reason it is safe there: it bounds
    * the wait for the response, and is stood down the moment the headers arrive.
    * A whole-file body is routinely large and may take as long as it takes.
-   *
-   * Not disposed on success, deliberately, and for the same reason
-   * {@link fetchWithDeadline} does not: the link to the caller's signal is what
-   * carries a cancellation to the socket while the body streams, and the body
-   * belongs to whoever we hand the response to. `responded` has already stopped
-   * the clock, so nothing is left to fire.
    */
   private async fetchWholeFile(url: string, init: RequestInit | undefined) {
     const deadline = withResponseDeadline(
@@ -294,12 +272,11 @@ export class RemoteFileWithRangeCache extends RemoteFile {
         `No response from ${url} after ${RESPONSE_TIMEOUT_MS / 1000}s (the connection was open and the server sent nothing; a transfer already under way is not subject to this limit, so this is a stalled request rather than a slow one)`,
     )
     try {
-      const res = await super.fetch(url, { ...init, signal: deadline.signal })
-      deadline.responded()
-      return res
+      return await super.fetch(url, { ...init, signal: deadline.signal })
     } catch (e) {
-      deadline.dispose()
       throw describeFetchFailure(e, deadline, url, url)
+    } finally {
+      deadline.stop()
     }
   }
 }

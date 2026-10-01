@@ -1,3 +1,5 @@
+import { getEventListeners } from 'node:events'
+
 import { afterEach, describe, expect, test } from 'vitest'
 
 import { withResponseDeadline } from '../src/errors.ts'
@@ -606,34 +608,18 @@ describe('stat is shared between callers that ask at once', () => {
 })
 
 describe('the response deadline lets go of the caller signal', () => {
-  test('dispose removes the listener it added', () => {
-    const controller = new AbortController()
-    let added = 0
-    let removed = 0
-    const { signal } = controller
-    const add = signal.addEventListener.bind(signal)
-    const remove = signal.removeEventListener.bind(signal)
-    signal.addEventListener = (...args: Parameters<typeof add>) => {
-      added++
-      add(...args)
-    }
-    signal.removeEventListener = (...args: Parameters<typeof remove>) => {
-      removed++
-      remove(...args)
-    }
+  test('composing adds no listener to the caller signal', () => {
+    const { signal } = new AbortController()
     const deadline = withResponseDeadline(signal, () => 'timed out')
-    expect(added).toBe(1)
-    deadline.responded()
-    expect(removed).toBe(0)
-    deadline.dispose()
-    expect(removed).toBe(1)
+    expect(getEventListeners(signal, 'abort')).toHaveLength(0)
+    deadline.stop()
   })
 
   test('cancellation still reaches the socket after the headers arrive', () => {
     const controller = new AbortController()
     const deadline = withResponseDeadline(controller.signal, () => 'timed out')
     // headers are in, the body is still streaming
-    deadline.responded()
+    deadline.stop()
     controller.abort(new Error('reader gave up'))
     expect(deadline.signal.aborted).toBe(true)
   })
@@ -643,7 +629,7 @@ describe('the response deadline lets go of the caller signal', () => {
     controller.abort(new Error('gone'))
     const deadline = withResponseDeadline(controller.signal, () => 'timed out')
     expect(deadline.signal.aborted).toBe(true)
-    deadline.dispose()
+    deadline.stop()
   })
 })
 

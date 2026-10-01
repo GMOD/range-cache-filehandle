@@ -111,8 +111,8 @@ in the process. What each was measured against is in `src/constants.ts` and in
   §15.5.17. Only single-part ranges are cached; a multi-range request is passed
   straight through rather than partly honored.
 - [WHATWG DOM: dependent signals](https://dom.spec.whatwg.org/#abortsignal-dependent-signals)
-  — why `AbortSignal.any` retains nothing while a hand-composed listener must be
-  removed.
+  — why the deadline's `AbortSignal.any` leaves nothing behind on a long-lived
+  caller signal.
 - [whatwg/fetch#951](https://github.com/whatwg/fetch/issues/951) — why `fetch`
   has no timeout, and why this package adds none over a transfer.
 - [Per-endpoint rate limiting](https://copdips.com/2023/01/python-aiohttp-rate-limit.html)

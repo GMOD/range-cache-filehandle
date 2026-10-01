@@ -17,84 +17,42 @@ export interface ResponseDeadline {
   signal: AbortSignal
   /** the error to report, set once the deadline has fired */
   expired?: Error
-  /** stop the clock; call as soon as the response headers arrive */
-  responded: () => void
-  /** unlink from the caller's signal; call once the request is over */
-  dispose: () => void
+  /** stop the clock; call once the response headers arrive or the fetch fails */
+  stop: () => void
 }
 
 /**
  * `signal`, plus a {@link RESPONSE_TIMEOUT_MS} deadline on the server beginning
  * to answer.
  *
- * **The caller's signal is composed, never replaced.** It is what carries
- * cancellation down to the socket and what the run's reference count aborts once
- * every reader has given up; handing `fetch` a deadline signal in its place
- * would silently take cancellation back off the socket, which is worth ~6.5 MiB
- * per cancelled navigation.
- *
- * Two disposers rather than one, because the two things being held have
- * different lifetimes. {@link ResponseDeadline.responded} stops the clock as
- * soon as the headers arrive, since from there the body may take as long as it
- * takes. {@link ResponseDeadline.dispose} unlinks from the caller's signal, and
- * cannot happen until the request is finished — unlink at the headers and a
- * caller aborting during the body would no longer reach the socket, which is
- * the leak this composition exists to prevent.
- *
- * **`dispose` is not optional, and this is the one place it matters.** A signal
- * holds its dependent signals weakly, so `AbortSignal.any` against a
- * session-long controller retains nothing — measured on node 24, all 20,000
- * composed signals were collected while their source stayed alive.
+ * The caller's signal is composed with the deadline, never replaced by it: it
+ * carries cancellation to the socket, through the body as well as the wait for
+ * headers. `AbortSignal.any` holds its sources weakly, so the composition needs
+ * no cleanup once the request is over.
  * @see https://dom.spec.whatwg.org/#abortsignal-dependent-signals
- * An event listener is the opposite: the source holds it strongly, and none of
- * 20,000 were collected. So composing by hand, as this does, is the version
- * that leaks if it is not cleaned up, and `removeEventListener` is what makes
- * it safe.
- *
- * Hand-composed anyway for two reasons. It is one code path rather than
- * `AbortSignal.any` plus a fallback for consumers whose targets predate it
- * (Chrome 116, Firefox 124, Safari 17.4), where a missing static would be a
- * TypeError on every range request. And the lifetime has to be explicit here
- * regardless, because of the two-disposer split above.
  *
  * `describe` is a thunk so nothing builds the message unless the deadline fires.
  */
 export function withResponseDeadline(
   signal: AbortSignal | null | undefined,
   describe: () => string,
-) {
-  const composed = new AbortController()
-  const onCallerAbort = () => {
-    composed.abort(signal?.reason)
-    // Stand the deadline down with it. Once the caller has given up there is
-    // nothing left for it to diagnose, and a `fetch` that does not honour the
-    // signal reaches neither `responded` nor `dispose` — so the timer fires
-    // half a minute later, writes `expired`, and `describeFetchFailure` prefers
-    // it, reporting a cancelled request as a server that never answered.
-    deadline.dispose()
-  }
-  const deadline: ResponseDeadline = {
-    signal: composed.signal,
-    responded: () => {
-      clearTimeout(timer)
-    },
-    dispose: () => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onCallerAbort)
-    },
-  }
-  if (signal?.aborted) {
-    composed.abort(signal.reason)
-  } else {
-    signal?.addEventListener('abort', onCallerAbort)
-  }
+): ResponseDeadline {
+  const timeout = new AbortController()
   const timer = setTimeout(() => {
-    deadline.expired = new Error(describe())
-    composed.abort(deadline.expired)
+    // a cancelled request is not a silent server, even under a fetch that
+    // ignores its signal
+    if (!signal?.aborted) {
+      deadline.expired = new Error(describe())
+      timeout.abort(deadline.expired)
+    }
   }, RESPONSE_TIMEOUT_MS)
-  // a deadline still pending must not hold a node process open, same reasoning
-  // as the sweep interval
   unrefIfPossible(timer)
+  const deadline: ResponseDeadline = {
+    signal: signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal,
+    stop: () => {
+      clearTimeout(timer)
+    },
+  }
   return deadline
 }
 

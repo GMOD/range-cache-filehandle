@@ -103,7 +103,10 @@ return or throw; there is no socket there to sit open on.
 The deadline is composed with the caller's signal, never substituted for it —
 replacing it would take cancellation back off the socket, which is the ~6.5 MiB
 per cancelled navigation that reference counting preserves
-([sharing.md](sharing.md)).
+([sharing.md](sharing.md)). `AbortSignal.any` does the composing, and because a
+signal holds its dependents weakly, a session-long signal passed to every read
+gathers no listeners. It needs Chrome 116, Firefox 124, Safari 17.4 or Node
+20.3.
 
 ## Where this runs
 
