@@ -27,7 +27,11 @@ const KINDS = {
  * come from constants.ts.
  */
 const NODES: { key: string; kind: keyof typeof KINDS; detail?: string }[] = [
-  { key: 'RemoteFileWithRangeCache#read', kind: 'plain', detail: 'key = url' },
+  {
+    key: 'RemoteFileWithRangeCache#fetchBytes',
+    kind: 'plain',
+    detail: 'key = url',
+  },
   {
     key: 'CachedFilehandle#read',
     kind: 'plain',
@@ -70,7 +74,7 @@ const NODES: { key: string; kind: keyof typeof KINDS; detail?: string }[] = [
 ]
 
 const ENTRY_POINTS = new Set([
-  'RemoteFileWithRangeCache#read',
+  'RemoteFileWithRangeCache#fetchBytes',
   'CachedFilehandle#read',
 ])
 

@@ -16,7 +16,7 @@ digraph architecture {
     label="the only part that knows what the source is"
     labelloc="t" fontname="Helvetica" fontsize=9 fontcolor="#57606a"
     color="#d0d7de" style="rounded" margin=9
-    RemoteFileWithRangeCache_read [label="RemoteFileWithRangeCache.read\nkey = url" fillcolor="#f6f8fa" color="#57606a"]
+    RemoteFileWithRangeCache_fetchBytes [label="RemoteFileWithRangeCache.fetchBytes\nkey = url" fillcolor="#f6f8fa" color="#57606a"]
     CachedFilehandle_read [label="CachedFilehandle.read\nkey = whatever names the bytes" fillcolor="#f6f8fa" color="#57606a"]
   }
 
@@ -35,9 +35,9 @@ digraph architecture {
 
   out [label="Uint8Array" fillcolor="#ddf4ff" color="#0969da"]
 
-  caller -> RemoteFileWithRangeCache_read
+  caller -> RemoteFileWithRangeCache_fetchBytes
   caller -> CachedFilehandle_read
-  RemoteFileWithRangeCache_read -> chunkCache_ts_getCachedRange
+  RemoteFileWithRangeCache_fetchBytes -> chunkCache_ts_getCachedRange
   CachedFilehandle_read -> chunkCache_ts_getCachedRange
   chunkCache_ts_getCachedRange -> chunkCache_ts_planRead
   chunkCache_ts_getCachedRange -> chunkCache_ts_assembleRange

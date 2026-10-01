@@ -27,18 +27,21 @@ Four methods behave differently from the base class.
 ### `read(length, position, opts?)`
 
 Bytes from the chunk cache, assembling and fetching as
-[dataflow.md](dataflow.md) describes. `headers`, `overrides` and `signal` all
-reach the underlying request, from the constructor and from `opts` both, merged
-the way `RemoteFile` merges them: `overrides` beats the method/redirect/mode
-defaults, `opts` beats the constructor, and `opts.signal` beats a signal
-supplied through `overrides`.
+[dataflow.md](dataflow.md) describes. `RemoteFile.read` validates the arguments,
+answers a zero length itself and hands the rest to `fetchBytes`, which this
+class overrides to read from the cache rather than unwrap a `Response` — that
+round trip is three copies of the range, 69-77% of a warm read. The override
+also refuses a length past what a `Uint8Array` can hold.
 
-It does not call `RemoteFile.read`, which would build a range header, call
-`fetch` and unwrap a `Response` — three copies of the range, 69-77% of a warm
-read. A subclass overriding `RemoteFile.read` will find it is no longer on the
-path, and so will one overriding `RemoteFile.fetchBytes`, which the base library
-documents as the seam for serving bytes another way — this class is already that
-override. Override this or `fetch` instead.
+Every request this class sends, the `stat()` probe included, is built by
+`RemoteFile.buildRequest`, so `headers`, `overrides` and `signal` from the
+constructor and from `opts` merge the way the base class merges them:
+`overrides` beats the method/redirect/mode defaults, `opts` beats the
+constructor, `opts.signal` beats a signal supplied through `overrides`, and a
+header name matches however it is capitalized.
+
+A subclass that overrides `fetchBytes` takes the cache off the path. Override
+`fetch` to change how requests are made.
 
 ### `fetch(url, init?)`
 

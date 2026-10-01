@@ -147,26 +147,13 @@ export function parseByteRange(range: string | null) {
 }
 
 /**
- * `RemoteFile.read`'s NaN guard, which neither reader in this package reaches
- * any more: both enter the chunk cache below that method. A NaN length arrives
- * from a corrupt index and would otherwise become a `bytes=NaN-NaN` request.
+ * Refuse a read whose arguments the chunk arithmetic would launder into a
+ * different, valid-looking request: a negative position becomes the suffix
+ * range `bytes=-262144--1`, and a fractional one is floored during assembly.
+ * Both come from an index that is corrupt or parsed against the wrong file.
  *
- * Widened past NaN because the chunk arithmetic downstream launders a bad
- * offset into something that looks like a real request instead of failing.
- * A negative position produces the header `bytes=-262144--1`, which is not a
- * malformed request a server rejects but a *valid* one meaning something else
- * — the leading `-` is the suffix-range form, so a server may answer 200 or
- * serve the last 262144 bytes of the file, and this layer would cache those
- * bytes at the wrong offsets. A fractional position is quieter still: it is
- * floored during assembly, so the read silently returns the bytes next to the
- * ones asked for. Both come from the same place a NaN does, an index that is
- * corrupt or being parsed against the wrong file.
- *
- * The magnitude of `length` matters as well as its sign. `planRead` walks one
- * iteration, promise and in-flight entry per {@link CHUNK_SIZE} of it, all
- * before the first await, so a corrupt length hangs the thread long before
- * `new Uint8Array` would have refused it — hence the ceiling at what a
- * `Uint8Array` can hold rather than at `Number.MAX_SAFE_INTEGER`.
+ * The length ceiling is what a `Uint8Array` can hold, because `planRead` walks
+ * one entry per {@link CHUNK_SIZE} of the length before its first await.
  */
 export function assertReadArgs(key: string, length: number, position: number) {
   if (Number.isNaN(length) || Number.isNaN(position)) {

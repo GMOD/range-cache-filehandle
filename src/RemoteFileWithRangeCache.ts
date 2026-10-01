@@ -36,25 +36,6 @@ import type { FilehandleOptions } from 'generic-filehandle2'
  */
 export class RemoteFileWithRangeCache extends RemoteFile {
   /**
-   * The options this handle was constructed with.
-   *
-   * Kept rather than reached for, because `RemoteFile` holds them privately and
-   * exposes them only through its own private `buildRequest`. `read` below
-   * deliberately does not go through that method, so without this copy the
-   * constructor's `headers`, `overrides` and `signal` reach nothing at all — see
-   * {@link buildReadRequest}.
-   *
-   * An explicit field rather than a constructor parameter property, which node's
-   * type stripper cannot erase; `erasableSyntaxOnly` bans them.
-   */
-  private baseOpts: FilehandleOptions
-
-  constructor(source: string, opts: FilehandleOptions = {}) {
-    super(source, opts)
-    this.baseOpts = opts
-  }
-
-  /**
    * Publish a size this handle learned other than by a range request.
    *
    * A subclass that overrides `stat` answers from somewhere the chunk cache
@@ -79,7 +60,9 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       // and through oncePerKey, so those N readers share one request rather
       // than making N of them for one number.
       await oncePerKey(this.url, () =>
-        limitConcurrency(this.url, () => this.fetchRange(this.url, 0, 0)),
+        limitConcurrency(this.url, () =>
+          this.fetchRange(this.url, 0, 0, this.buildRequest({})),
+        ),
       )
     }
     const size = getSize(this.url)
@@ -184,9 +167,7 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     end: number,
     init: RequestInit | undefined,
   ) {
-    // Preserve everything the caller put on the request — auth headers,
-    // credentials, the abort signal, RemoteFile.read's buildRequest overrides —
-    // and replace only the range.
+    // keep everything buildRequest put on the request and replace only the range
     const headers = new Headers(init?.headers)
     headers.set('range', `bytes=${start}-${end}`)
     // Deliberately here rather than a layer up: this call is the shared one.
@@ -236,65 +217,17 @@ export class RemoteFileWithRangeCache extends RemoteFile {
   }
 
   /**
-   * Bytes for a byte range, straight out of the chunk cache.
-   *
-   * `RemoteFile.read` would build the range header, call {@link fetch}, and
-   * unwrap the `Response` it got back. Every one of those steps is a copy of
-   * the whole range, and on a cache hit there is no network for them to hide
-   * behind: measured warm, with the chunk cache fully populated, the
-   * `Response` round trip was **69-77%** of the read (6.15ms vs 1.90ms at
-   * 16MB, 0.36ms vs 0.08ms at 256KB).
-   *
-   * `fetch` below still caches, so anything that reaches this class by that
-   * route — a caller setting its own range header — is unaffected. This is
-   * the same cache, entered one layer lower.
+   * Bytes straight out of the chunk cache, skipping the `Response` that
+   * `RemoteFile.fetchBytes` would build and unwrap. The length ceiling is ours:
+   * `planRead` walks one entry per chunk before its first await.
    */
-  override async read(
+  protected override async fetchBytes(
     length: number,
     position: number,
-    opts: FilehandleOptions = {},
+    opts: FilehandleOptions,
   ): Promise<Uint8Array<ArrayBuffer>> {
-    // mirrors RemoteFile.read's guards, which we no longer go through. Ahead of
-    // the zero-length short-circuit, or `read(0, -1)` is accepted quietly while
-    // `read(1, -1)` throws
     assertReadArgs(this.url, length, position)
-    if (length === 0) {
-      return new Uint8Array(0)
-    }
-    return this.cachedRange(
-      this.url,
-      position,
-      length,
-      this.buildReadRequest(opts),
-    )
-  }
-
-  /**
-   * The request `RemoteFile.buildRequest` would have built for this read.
-   *
-   * Repeated here rather than called, because that method is private to the base
-   * class and the range path does not reach it: `fetchWithDeadline` ends at
-   * `RemoteFile.fetch`, which hands an init straight to the fetch implementation
-   * rather than building one. Left to the per-call options alone, a handle
-   * constructed with an `authorization` header sent **every range request
-   * unauthenticated** — measured — and a constructor `signal` cancelled nothing.
-   *
-   * Same merge order as the base class, and the order is the contract:
-   * `overrides` beats the method/redirect/mode defaults so a caller can set
-   * them, per-call options beat the constructor's, and the signal is applied
-   * last so `opts.signal` beats one supplied through `overrides`.
-   */
-  private buildReadRequest(opts: FilehandleOptions): RequestInit {
-    const signal = opts.signal ?? this.baseOpts.signal
-    return {
-      method: 'GET',
-      redirect: 'follow',
-      mode: 'cors',
-      ...this.baseOpts.overrides,
-      ...opts.overrides,
-      headers: { ...this.baseOpts.headers, ...opts.headers },
-      ...(signal ? { signal } : {}),
-    }
+    return this.cachedRange(this.url, position, length, this.buildRequest(opts))
   }
 
   // NOTE: range reads return a fully-assembled in-memory Response, so
@@ -317,7 +250,7 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       const range = parseByteRange(new Headers(init?.headers).get('range'))
       if (range) {
         const length = range.end - range.start + 1
-        // The same guard `read` applies, for the same reason one layer down.
+        // The same guard `fetchBytes` applies, for the same reason one layer down.
         // `parseByteRange` accepts any pair of digits, and the chunk machinery
         // walks one iteration, promise and in-flight entry per CHUNK_SIZE of
         // the length before its first await: measured, `bytes=0-99999999999999`
@@ -408,9 +341,8 @@ function describeFetchFailure(
  * every chunk past the first would be filled with data from the wrong position —
  * silently, and typically surfacing much later as a parse error like "invalid
  * bgzf header". Only tolerate it when the request started at 0, where the body
- * genuinely covers the requested bytes. This mirrors generic-filehandle2's
- * RemoteFile.read, whose equivalent check this class bypasses by synthesizing
- * its own 206 Response in fetch().
+ * genuinely covers the requested bytes. This mirrors the check in
+ * generic-filehandle2's `RemoteFile.fetchBytes`, which this class overrides.
  */
 function assertServedTheRange(
   res: Response,
