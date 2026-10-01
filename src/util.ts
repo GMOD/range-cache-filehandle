@@ -208,3 +208,82 @@ export function copyChunkInto({
     result.set(chunk.subarray(from - chunkStart, to - chunkStart), from - start)
   }
 }
+
+/** the origin of an http(s) URL, resolved against the page; otherwise undefined */
+export function httpOrigin(url: string) {
+  try {
+    const base = typeof location === 'undefined' ? undefined : location.href
+    const { protocol, origin } = new URL(url, base)
+    return protocol === 'http:' || protocol === 'https:' ? origin : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function lockManager() {
+  return (globalThis as { navigator?: { locks?: LockManager } }).navigator
+    ?.locks
+}
+
+function bodyLockName(origin: string) {
+  return `@gmod/range-cache-filehandle body ${origin}`
+}
+
+const bodiesHere = new Map<string, number>()
+
+async function holdLock(origin: string, until: Promise<void>) {
+  try {
+    await lockManager()?.request(
+      bodyLockName(origin),
+      { mode: 'shared' },
+      () => until,
+    )
+  } catch {
+    // a sandboxed embed rejects with SecurityError; bodiesHere still counts
+  }
+}
+
+/**
+ * Count a response body in progress on the URL's origin until the returned
+ * function is called: in this context, and through a shared Web Lock for every
+ * worker and tab on the page.
+ */
+export function holdBody(url: string) {
+  const origin = httpOrigin(url)
+  if (origin === undefined) {
+    return () => undefined
+  }
+  bodiesHere.set(origin, (bodiesHere.get(origin) ?? 0) + 1)
+  let unlock = (): void => undefined
+  void holdLock(
+    origin,
+    new Promise<void>(resolve => {
+      unlock = resolve
+    }),
+  )
+  let held = true
+  return () => {
+    if (held) {
+      held = false
+      unlock()
+      const left = (bodiesHere.get(origin) ?? 1) - 1
+      if (left > 0) {
+        bodiesHere.set(origin, left)
+      } else {
+        bodiesHere.delete(origin)
+      }
+    }
+  }
+}
+
+/** bodies in progress on `origin`, in any context the lock manager can see */
+export async function bodiesInProgress(origin: string) {
+  const here = bodiesHere.get(origin) ?? 0
+  try {
+    const { held = [] } = (await lockManager()?.query()) ?? {}
+    const name = bodyLockName(origin)
+    return Math.max(here, held.filter(lock => lock.name === name).length)
+  } catch {
+    return here
+  }
+}

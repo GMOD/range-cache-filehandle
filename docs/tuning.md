@@ -108,6 +108,36 @@ signal holds its dependents weakly, a session-long signal passed to every read
 gathers no listeners. It needs Chrome 116, Firefox 124, Safari 17.4 or Node
 20.3.
 
+### Requests the browser has queued
+
+A browser opens six connections to one HTTP/1.1 origin, shared by every worker
+and tab of the page, and holds a seventh `fetch` unsent in its own queue with
+its promise pending. The page cannot see when a request leaves that queue, so
+the deadline would count the wait, and on a slow link a request that was never
+sent would fail as a server that sent nothing.
+
+The deadline therefore re-arms on evidence that the origin is answering. Each
+request counts its body from the moment its headers arrive until the body ends,
+is cancelled or fails, both in its own context and as a shared Web Lock named
+for the origin, which `navigator.locks.query()` shows to every worker and tab.
+When a deadline fires and `BROWSER_CONNECTIONS_PER_HOST` (six) or more bodies
+are in progress on its origin, it re-arms for another 30 seconds instead of
+failing, at most `MAX_DEADLINE_REARMS` (ten) times, so six bodies stalled
+forever still end in an error after five and a half minutes. A whole-file
+`readFile` counts its body the same way. Only http(s) origins take part.
+
+Three limits remain:
+
+- A page without `navigator.locks` counts only its own context's bodies. Any
+  insecure context lacks it, which is every page served over plain http except
+  from localhost or 127.0.0.1, so there a request queued behind another worker's
+  six bodies still fails at 30 seconds. A sandboxed embed whose lock requests
+  reject falls back the same way.
+- On an HTTP/2 origin six streaming bodies do not mean a queue, so a request
+  that really is silent is reported up to five minutes late while they stream.
+- A whole-file response a caller takes from `fetch` directly, rather than
+  through `readFile`, is not counted.
+
 ## Where this runs
 
 The cache is module state, so its scope is one module instance: **one per

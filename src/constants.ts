@@ -125,3 +125,17 @@ export const MAX_SIZE_ENTRIES = 5000
  * or throw; there is no socket there to sit open on.
  */
 export const RESPONSE_TIMEOUT_MS = 30_000
+
+/**
+ * Connections a browser opens to one HTTP/1.1 origin, shared by every worker
+ * and tab of the page. A request past them waits, unsent, in the browser's own
+ * queue, so a response deadline that fires while this many bodies are in
+ * progress on the origin re-arms rather than failing.
+ */
+export const BROWSER_CONNECTIONS_PER_HOST = 6
+
+/**
+ * How many times a response deadline re-arms, so six bodies stalled forever
+ * still end in an error: eleven periods of {@link RESPONSE_TIMEOUT_MS}.
+ */
+export const MAX_DEADLINE_REARMS = 10

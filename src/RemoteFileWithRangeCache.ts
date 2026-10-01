@@ -9,7 +9,7 @@ import {
   recordSize,
   recordSizeIfUnknown,
 } from './chunkCache.ts'
-import { CHUNK_SIZE, RESPONSE_TIMEOUT_MS } from './constants.ts'
+import { CHUNK_SIZE } from './constants.ts'
 import {
   isNetworkRejection,
   networkFailureHint,
@@ -19,6 +19,7 @@ import {
 import {
   assertReadArgs,
   discardBody,
+  holdBody,
   parseByteRange,
   parseContentRange,
   readBodyAtMost,
@@ -94,7 +95,12 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     init?: RequestInit,
   ) {
     const res = await this.fetchWithDeadline(url, start, end, init)
-    return this.readRange(res, url, start, end)
+    const release = holdBody(url)
+    try {
+      return await this.readRange(res, url, start, end)
+    } finally {
+      release()
+    }
   }
 
   /** the bytes of a response, once its status and its claims check out */
@@ -166,8 +172,9 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     // is watching any more.
     const deadline = withResponseDeadline(
       init?.signal,
-      () =>
-        `No response from ${url} for bytes ${start}-${end} after ${RESPONSE_TIMEOUT_MS / 1000}s (the connection was open and the server sent nothing; a transfer already under way is not subject to this limit, so this is a stalled request rather than a slow one)`,
+      seconds =>
+        `No response from ${url} for bytes ${start}-${end} after ${seconds}s (the connection was open and the server sent nothing; a transfer already under way is not subject to this limit, so this is a stalled request rather than a slow one)`,
+      url,
     )
     try {
       return await super.fetch(url, {
@@ -250,6 +257,19 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       : super.fetch(url, init)
   }
 
+  // counted like a range body, so a deadline elsewhere on this origin can tell
+  // the browser's connections are busy
+  protected override async readFileBody(
+    ...args: Parameters<RemoteFile['readFileBody']>
+  ) {
+    const release = holdBody(this.url)
+    try {
+      return await super.readFileBody(...args)
+    } finally {
+      release()
+    }
+  }
+
   /**
    * `super.fetch` for a whole-file read, under the same response deadline the
    * range path uses.
@@ -268,8 +288,9 @@ export class RemoteFileWithRangeCache extends RemoteFile {
   private async fetchWholeFile(url: string, init: RequestInit | undefined) {
     const deadline = withResponseDeadline(
       init?.signal,
-      () =>
-        `No response from ${url} after ${RESPONSE_TIMEOUT_MS / 1000}s (the connection was open and the server sent nothing; a transfer already under way is not subject to this limit, so this is a stalled request rather than a slow one)`,
+      seconds =>
+        `No response from ${url} after ${seconds}s (the connection was open and the server sent nothing; a transfer already under way is not subject to this limit, so this is a stalled request rather than a slow one)`,
+      url,
     )
     try {
       return await super.fetch(url, { ...init, signal: deadline.signal })

@@ -106,6 +106,11 @@ carries its own.
 The message names the range on the range path and the file on the whole-file
 one, which is also how you can tell which of the two you are looking at.
 
+The seconds in the message are the whole wait. A request the browser held in its
+per-host queue behind six streaming bodies waits longer than 30 seconds before
+it is reported; [tuning.md](tuning.md#requests-the-browser-has-queued) has the
+rule.
+
 ## The one that succeeds and still fails
 
 `stat()` throws rather than returning `size: 0` when the request came back fine

@@ -9,8 +9,12 @@
  * Deliberately no retry: a failed range read surfaces as an error and the
  * reader decides.
  */
-import { RESPONSE_TIMEOUT_MS } from './constants.ts'
-import { unrefIfPossible } from './util.ts'
+import {
+  BROWSER_CONNECTIONS_PER_HOST,
+  MAX_DEADLINE_REARMS,
+  RESPONSE_TIMEOUT_MS,
+} from './constants.ts'
+import { bodiesInProgress, httpOrigin, unrefIfPossible } from './util.ts'
 
 export interface ResponseDeadline {
   /** what to hand `fetch`: the caller's signal and this deadline, composed */
@@ -31,28 +35,60 @@ export interface ResponseDeadline {
  * no cleanup once the request is over.
  * @see https://dom.spec.whatwg.org/#abortsignal-dependent-signals
  *
- * `describe` is a thunk so nothing builds the message unless the deadline fires.
+ * The page cannot see when a request leaves the browser's per-host queue, so a
+ * deadline that fires while {@link BROWSER_CONNECTIONS_PER_HOST} bodies are in
+ * progress on the URL's origin takes that as the reason and re-arms, up to
+ * {@link MAX_DEADLINE_REARMS} times.
+ *
+ * `describe` is given the seconds waited, and is a thunk so nothing builds the
+ * message unless the deadline fires.
  */
 export function withResponseDeadline(
   signal: AbortSignal | null | undefined,
-  describe: () => string,
+  describe: (seconds: number) => string,
+  url?: string,
 ): ResponseDeadline {
+  const origin = url === undefined ? undefined : httpOrigin(url)
   const timeout = new AbortController()
-  const timer = setTimeout(() => {
-    // a cancelled request is not a silent server, even under a fetch that
-    // ignores its signal
-    if (!signal?.aborted) {
-      deadline.expired = new Error(describe())
+  let stopped = false
+  let periods = 0
+  let timer: ReturnType<typeof setTimeout> | undefined
+  // a cancelled request is not a silent server, even under a fetch that
+  // ignores its signal
+  const live = () => !stopped && !signal?.aborted
+  const expire = async () => {
+    periods++
+    const queued =
+      origin !== undefined &&
+      periods <= MAX_DEADLINE_REARMS &&
+      (await bodiesInProgress(origin)) >= BROWSER_CONNECTIONS_PER_HOST
+    if (!live()) {
+      return
+    } else if (queued) {
+      arm()
+    } else {
+      deadline.expired = new Error(
+        describe((periods * RESPONSE_TIMEOUT_MS) / 1000),
+      )
       timeout.abort(deadline.expired)
     }
-  }, RESPONSE_TIMEOUT_MS)
-  unrefIfPossible(timer)
+  }
+  const arm = () => {
+    timer = setTimeout(() => {
+      if (live()) {
+        void expire()
+      }
+    }, RESPONSE_TIMEOUT_MS)
+    unrefIfPossible(timer)
+  }
   const deadline: ResponseDeadline = {
     signal: signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal,
     stop: () => {
+      stopped = true
       clearTimeout(timer)
     },
   }
+  arm()
   return deadline
 }
 
