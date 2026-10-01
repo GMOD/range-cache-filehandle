@@ -938,15 +938,49 @@ export async function getCachedRange(
   const lastChunk = Math.floor((end - 1) / CHUNK_SIZE)
 
   const plan = planRead(key, startChunk, lastChunk, init, doFetch)
-  await Promise.all(
-    plan.pending.map(async ({ index, chunk }) => {
-      plan.chunks.set(index, await chunk)
-    }),
-  )
-  // The bytes arrived, but this read gave up while waiting for them — the
-  // request it was sharing kept going because somebody else still wanted it.
-  // Cancellation is per-reader even though the fetch is not.
-  init?.signal?.throwIfAborted()
+  if (plan.pending.length > 0) {
+    const signal = init?.signal ?? undefined
+    try {
+      await waitAsCaller(
+        Promise.all(
+          plan.pending.map(async ({ index, chunk }) => {
+            plan.chunks.set(index, await chunk)
+          }),
+        ),
+        signal,
+      )
+    } catch (e) {
+      signal?.throwIfAborted()
+      throw e
+    }
+    signal?.throwIfAborted()
+  }
 
   return assembleRange(key, plan, start, end, startChunk)
+}
+
+/**
+ * Await `promise`, but reject with the reader's own reason as soon as `signal`
+ * aborts: a shared run keeps going while anyone else wants it.
+ */
+function waitAsCaller<T>(promise: Promise<T>, signal: AbortSignal | undefined) {
+  if (!signal) {
+    return promise
+  }
+  const unsubscribe = new AbortController()
+  return Promise.race([
+    promise,
+    new Promise<never>((_resolve, reject) => {
+      signal.addEventListener(
+        'abort',
+        () => {
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          reject(signal.reason)
+        },
+        { once: true, signal: unsubscribe.signal },
+      )
+    }),
+  ]).finally(() => {
+    unsubscribe.abort()
+  })
 }

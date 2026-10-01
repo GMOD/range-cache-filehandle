@@ -29,6 +29,12 @@ When a reader's signal aborts, it comes out of the set. When the set empties,
 the run's controller aborts and the request is cancelled for real — down to the
 socket, which is worth ~6.5 MiB on a cancelled navigation.
 
+A reader that aborts rejects at once with its own `signal.reason`, whether or
+not the run goes on for somebody else. `getCachedRange` races the run against
+the reader's signal and, on any rejection, prefers that reader's reason to
+whatever the run reported, so two readers that abort with different reasons each
+get back their own.
+
 Three cases around that are worth naming, because each was a bug before it was a
 rule.
 

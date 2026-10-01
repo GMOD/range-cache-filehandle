@@ -86,10 +86,9 @@ first `await`, which is what makes eviction underneath it harmless: the global
 cache is shared and capped, so a concurrent read's `putCached` can drop a chunk
 this read still needs, and the local reference means it never notices.
 
-The last thing before returning is a second `throwIfAborted`. The bytes may have
-arrived after this particular reader gave up — the request kept going because
-somebody else still wanted it — and cancellation is per-reader even though the
-fetch is not.
+A read waits for its chunks and its own signal at once. Cancellation is
+per-reader even though the fetch is not: a reader that aborts rejects at once
+with its own reason, while the request keeps going for anyone else who wants it.
 
 ## Where the two entry points differ
 
