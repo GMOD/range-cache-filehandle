@@ -67,8 +67,8 @@ It coalesces a run of chunks into one request, so a large one is the normal
 case, and any duration limit would cut off a slow download rather than a broken
 one — `fetch`
 [has no timeout of its own](https://github.com/whatwg/fetch/issues/951) for the
-same reason. The way to stop a read is the `AbortSignal` you passed it, which is
-carried to the socket.
+same reason. To stop a read, abort the `AbortSignal` you passed it, which the
+cache passes through to the socket.
 
 Requests are capped per origin rather than per process so that one unresponsive
 server cannot starve the others — the
@@ -120,9 +120,9 @@ in the process. What each was measured against is in `src/constants.ts` and in
 
 ## The layer above
 
-This layer caches bytes. Every parser that reads through it caches what it
-parsed out of them, on its own budget and its own idle timeout; whether a read
-reaches this layer at all depends on that cache:
+range-cache-filehandle caches bytes. Every parser that reads through it caches
+what it parsed out of them, with a separate budget and idle timeout; whether a
+read reaches this layer at all depends on that cache:
 
 - [@gmod/bam](https://github.com/GMOD/bam-js) —
   [caching.md](https://github.com/GMOD/bam-js/blob/main/docs/caching.md)
@@ -142,7 +142,7 @@ depending on `@jbrowse/core`.
 Replaces [http-range-fetcher](https://github.com/rbuels/http-range-fetcher), the
 earlier inspiration. That merges the requests made in the last 100 ms; this
 merges the chunks a read is missing, so it needs no window to wait out and
-carries an `AbortSignal` to the socket.
+passes an `AbortSignal` through to the socket.
 
 ## License
 
