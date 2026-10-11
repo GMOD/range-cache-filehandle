@@ -1,3 +1,14 @@
+## [1.5.1](https://github.com/GMOD/range-cache-filehandle/compare/v1.5.0...v1.5.1) (2026-10-11)
+
+### Documentation
+
+- Plainer README wording ([718c078](https://github.com/GMOD/range-cache-filehandle/commit/718c078e9e233db62650ef08cab353ac21b8e0c7))
+- Break up README walls of text ([16fe0e8](https://github.com/GMOD/range-cache-filehandle/commit/16fe0e8c8c767b7cc65d86b9d25cddc0e61963a9))
+
+### Tests
+
+- Fail when docs/api.md misses a public member or export ([9da615d](https://github.com/GMOD/range-cache-filehandle/commit/9da615dcb4803455b766e671d78bdfac9a5641d4))
+
 ## [1.5.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.4.0...v1.5.0) (2026-10-01)
 
 ### Bug Fixes
