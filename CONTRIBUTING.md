@@ -18,6 +18,11 @@ workflow.
 
 ## Docs
 
+[docs/api.md](docs/api.md) is written by hand, and `test/apiDocs.test.ts` fails
+when a public member of `RemoteFileWithRangeCache`, `CachedFilehandle`, or an
+export, is missing from it. Document the new member, or add it to the test's
+`undocumented` list with the reason it is internal.
+
 Two of the diagrams are drawn from the source rather than by hand, so that a
 change nobody redraws is a failing test rather than a picture that has quietly
 stopped being true:
