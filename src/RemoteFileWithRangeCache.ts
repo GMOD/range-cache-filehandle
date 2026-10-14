@@ -191,8 +191,12 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     length: number,
     init?: RequestInit,
   ) {
-    return getCachedRange(url, start, length, init, (s, e, runInit) =>
-      this.fetchRange(url, s, e, runInit),
+    return getCachedRange(
+      url,
+      start,
+      length,
+      init?.signal ?? undefined,
+      (s, e, signal) => this.fetchRange(url, s, e, { ...init, signal }),
     )
   }
 

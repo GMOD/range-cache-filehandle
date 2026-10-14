@@ -90,12 +90,13 @@ export interface FetchedRange {
 
 /**
  * Fetches an inclusive byte range `[start, end]`, however the underlying source
- * does that. The one thing the chunk cache needs from a file.
+ * does that, under the run's `signal`. The one thing the chunk cache needs from
+ * a file.
  */
 export type FetchByteRange = (
   start: number,
   end: number,
-  init?: RequestInit,
+  signal: AbortSignal,
 ) => Promise<FetchedRange>
 
 /**
@@ -613,7 +614,7 @@ function recordSizeIfUnknown(key: string, size: number | undefined) {
 function fetchRun(
   key: string,
   run: ChunkRun,
-  init: RequestInit | undefined,
+  signal: AbortSignal | undefined,
   doFetch: FetchByteRange,
 ) {
   const state: RunState = {
@@ -633,10 +634,11 @@ function fetchRun(
       // every reader gave up while this was queued, so there is nothing to ask
       // for. On a pan that is the ordinary case rather than a corner
       state.controller.signal.throwIfAborted()
-      return doFetch(run.start * CHUNK_SIZE, (run.end + 1) * CHUNK_SIZE - 1, {
-        ...init,
-        signal: state.controller.signal,
-      })
+      return doFetch(
+        run.start * CHUNK_SIZE,
+        (run.end + 1) * CHUNK_SIZE - 1,
+        state.controller.signal,
+      )
     },
     // and the same signal takes the run back out of the queue, rather than
     // leaving it waiting for a slot it no longer wants
@@ -650,7 +652,7 @@ function fetchRun(
     }
     return bytes
   })
-  joinRun(state, init?.signal)
+  joinRun(state, signal)
   const settle = () => {
     state.settled = true
     // nothing reads these once the request has settled, and holding them
@@ -717,7 +719,7 @@ function publishChunk(
  * a caller that never asked to be cancellable, and it means one signal-free
  * read makes that request uncancellable for everyone sharing it.
  */
-function joinRun(state: RunState, signal: RequestInit['signal']) {
+function joinRun(state: RunState, signal: AbortSignal | undefined) {
   if (!signal) {
     state.pinned = true
   } else if (signal.aborted) {
@@ -769,7 +771,7 @@ function abortIfUnwanted(state: RunState, reason: unknown) {
  * Returns undefined when the run is not joinable, and the caller fetches the
  * chunk itself instead.
  */
-function joinChunk(flight: InFlightChunk, init?: RequestInit) {
+function joinChunk(flight: InFlightChunk, signal: AbortSignal | undefined) {
   if (flight.run.controller.signal.aborted) {
     // Every reader of this run gave up, so its request was cancelled — but the
     // rejection takes a tick to arrive and the entry is not removed until after
@@ -788,7 +790,7 @@ function joinChunk(flight: InFlightChunk, init?: RequestInit) {
   // putCached runs after settle, so there is a window in which the bytes have
   // arrived and are in neither the cache nor this map.
   if (!flight.run.settled) {
-    joinRun(flight.run, init?.signal)
+    joinRun(flight.run, signal)
   }
   return flight.chunk
 }
@@ -822,7 +824,7 @@ function planRead(
   key: string,
   startChunk: number,
   lastChunk: number,
-  init: RequestInit | undefined,
+  signal: AbortSignal | undefined,
   doFetch: FetchByteRange,
 ): ReadPlan {
   const chunks = new Map<number, Uint8Array>()
@@ -838,7 +840,7 @@ function planRead(
         break
       }
     } else {
-      const joined = joinInFlight(key, index, init)
+      const joined = joinInFlight(key, index, signal)
       if (joined === undefined) {
         extendRuns(runs, index)
       } else {
@@ -847,7 +849,7 @@ function planRead(
     }
   }
   for (const run of runs) {
-    pending.push(...fetchRun(key, run, init, doFetch))
+    pending.push(...fetchRun(key, run, signal, doFetch))
   }
   return { chunks, pending, endChunk }
 }
@@ -855,10 +857,10 @@ function planRead(
 function joinInFlight(
   key: string,
   index: number,
-  init: RequestInit | undefined,
+  signal: AbortSignal | undefined,
 ) {
   const flight = inFlight.get(cacheKey(key, index))
-  return flight ? joinChunk(flight, init) : undefined
+  return flight ? joinChunk(flight, signal) : undefined
 }
 
 /** append `index` to the run in progress, or start a new one */
@@ -922,7 +924,7 @@ export async function getCachedRange(
   key: string,
   start: number,
   length: number,
-  init: RequestInit | undefined,
+  signal: AbortSignal | undefined,
   doFetch: FetchByteRange,
 ) {
   // A read whose caller has already given up must not join, or even open, a
@@ -930,7 +932,7 @@ export async function getCachedRange(
   // being read — nothing between there and here looks at the signal — so a
   // whole batch of reads arrives already cancelled, and letting them through
   // both wastes the fetch and poisons the reference count (see joinRun).
-  init?.signal?.throwIfAborted()
+  signal?.throwIfAborted()
   // Clamp to a known file size. @gmod/bam and @gmod/tabix compute
   // fetchedSize() = maxv.blockPosition + (1<<16) - minv.blockPosition to
   // guarantee they read the complete final bgzf block, so their last read of
@@ -951,9 +953,8 @@ export async function getCachedRange(
   const startChunk = Math.floor(start / CHUNK_SIZE)
   const lastChunk = Math.floor((end - 1) / CHUNK_SIZE)
 
-  const plan = planRead(key, startChunk, lastChunk, init, doFetch)
+  const plan = planRead(key, startChunk, lastChunk, signal, doFetch)
   if (plan.pending.length > 0) {
-    const signal = init?.signal ?? undefined
     try {
       await waitAsCaller(
         Promise.all(
@@ -963,11 +964,10 @@ export async function getCachedRange(
         ),
         signal,
       )
-    } catch (e) {
+    } finally {
+      // the reader's own reason, whether the run failed or finished meanwhile
       signal?.throwIfAborted()
-      throw e
     }
-    signal?.throwIfAborted()
   }
 
   return assembleRange(key, plan, start, end, startChunk)

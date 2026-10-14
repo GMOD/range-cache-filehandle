@@ -59,15 +59,15 @@ export class CachedFilehandle implements GenericFilehandle {
       this.key,
       position,
       length,
-      opts.signal ? { signal: opts.signal } : undefined,
+      opts.signal,
       // everything the caller passed reaches the inner handle, since it may
       // be a filehandle for which `headers` and `overrides` mean something —
       // a RemoteFile, or one of its subclasses. Only the signal is replaced:
       // the request belongs to the run, which outlives any one reader of it
-      async (start, end, init) => ({
+      async (start, end, signal) => ({
         bytes: await this.inner.read(end - start + 1, start, {
           ...opts,
-          ...(init?.signal ? { signal: init.signal } : {}),
+          signal,
         }),
       }),
     )
