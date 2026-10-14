@@ -109,6 +109,10 @@ empty.
 such as a `LocalFile`, a `BlobFile`, or your own implementation, since the cache
 contains no HTTP-specific code.
 
+For a URL, use `RemoteFileWithRangeCache`. `CachedFilehandle` sees its inner
+handle's `read` and never a response, so around a `RemoteFile` it gets no
+response deadline, no `Content-Range` checks and no size from a range request.
+
 ```js
 const file = new CachedFilehandle(new LocalFile(path), `file://${path}`)
 ```

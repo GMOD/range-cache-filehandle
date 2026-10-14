@@ -121,8 +121,9 @@ export const MAX_SIZE_ENTRIES = 5000
  * chrom.sizes, chromAlias and cytoband files are all read that way, and it was
  * the last path here with no clock on it at all.
  *
- * `CachedFilehandle` carries none. It wraps a local file or a Blob, which return
- * or throw; there is no socket there to sit open on.
+ * `CachedFilehandle` carries none: it sees its inner handle's `read`, never a
+ * response. A local file or a Blob returns or throws, and a URL belongs in
+ * `RemoteFileWithRangeCache`.
  */
 export const RESPONSE_TIMEOUT_MS = 30_000
 

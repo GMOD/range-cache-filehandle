@@ -91,8 +91,9 @@ path matters more than its share of the traffic suggests. An assembly's
 chrom.sizes, chromAlias and cytoband files are all read that way, and a hub that
 accepts the connection and goes silent leaves a spinner and no error at all.
 
-`CachedFilehandle` has no deadline, because it wraps a local file or a Blob,
-which returns or throws, and there is no socket to stay open.
+`CachedFilehandle` has no deadline, because it sees its inner handle's `read`
+and never a response. A local file or a Blob returns or throws, and a URL
+belongs in `RemoteFileWithRangeCache`.
 
 The code combines the deadline with the caller's signal rather than replacing
 the caller's signal. Replacing it would stop cancellation from reaching the
