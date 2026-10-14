@@ -79,7 +79,7 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     end: number,
     init?: RequestInit,
   ) {
-    const res = await this.fetchWithDeadline(url, start, end, init)
+    const res = await this.fetchWithDeadline(url, init, { start, end })
     const release = holdBody(url)
     try {
       return await this.readRange(res, url, start, end)
@@ -142,41 +142,51 @@ export class RemoteFileWithRangeCache extends RemoteFile {
   }
 
   /**
-   * `super.fetch` for one byte range, under a deadline on the server beginning
-   * to answer, with a network-level rejection turned into something readable.
+   * `super.fetch` under a deadline on the server beginning to answer, with a
+   * network-level rejection turned into something readable.
+   *
+   * Both HTTP paths come through here: a range read, and a whole-file
+   * `readFile`, which sends no range header. The whole-file path matters more
+   * than its share of the traffic suggests: an assembly's chrom.sizes,
+   * chromAlias and cytoband files are read that way, and a hub that accepted
+   * the connection and went silent left the caller with a spinner and no error.
+   * The deadline is stood down once the headers arrive, so a large body may
+   * take as long as it takes.
+   *
+   * Deliberately here rather than a layer up: this call is the shared one.
+   * fetchRun coalesces every reader of these chunks onto it, so the deadline
+   * belongs to the request and fails all of them together — one stalled reader
+   * with a deadline of its own would strand the rest on a fetch nobody is
+   * watching any more.
    */
   private async fetchWithDeadline(
     url: string,
-    start: number,
-    end: number,
     init: RequestInit | undefined,
+    range?: { start: number; end: number },
   ) {
-    // keep everything buildRequest put on the request and replace only the range
-    const headers = new Headers(init?.headers)
-    headers.set('range', `bytes=${start}-${end}`)
-    // Deliberately here rather than a layer up: this call is the shared one.
-    // fetchRun coalesces every reader of these chunks onto it, so the deadline
-    // belongs to the request and fails all of them together — one stalled
-    // reader with a deadline of its own would strand the rest on a fetch nobody
-    // is watching any more.
+    const span = range && `bytes ${range.start}-${range.end}`
     const deadline = withResponseDeadline(
       init?.signal,
       seconds =>
-        `No response from ${url} for bytes ${start}-${end} after ${seconds}s (the connection was open and the server sent nothing; a transfer already under way is not subject to this limit, so this is a stalled request rather than a slow one)`,
+        `No response from ${url}${span ? ` for ${span}` : ''} after ${seconds}s (the connection was open and the server sent nothing; a transfer already under way is not subject to this limit, so this is a stalled request rather than a slow one)`,
       url,
     )
+    const request: RequestInit = { ...init, signal: deadline.signal }
+    if (range) {
+      // keep everything buildRequest put on the request and replace only the
+      // range
+      const headers = new Headers(init?.headers)
+      headers.set('range', `bytes=${range.start}-${range.end}`)
+      request.headers = headers
+    }
     try {
-      return await super.fetch(url, {
-        ...init,
-        headers,
-        signal: deadline.signal,
-      })
+      return await super.fetch(url, request)
     } catch (e) {
       throw describeFetchFailure(
         e,
         deadline,
         url,
-        `${url} bytes ${start}-${end}`,
+        span ? `${url} ${span}` : url,
       )
     } finally {
       deadline.stop()
@@ -230,24 +240,23 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     // Only a string URL is cacheable: a Request object has no stable cache key
     // (String(request) is "[object Request]", which every Request shares) and
     // carries headers the range path would drop.
-    if (typeof url === 'string') {
-      const range = parseByteRange(new Headers(init?.headers).get('range'))
-      if (range) {
-        const length = range.end - range.start + 1
-        // The same guard `fetchBytes` applies, for the same reason one layer down.
-        // `parseByteRange` accepts any pair of digits, and the chunk machinery
-        // walks one iteration, promise and in-flight entry per CHUNK_SIZE of
-        // the length before its first await: measured, `bytes=0-99999999999999`
-        // spent 112 seconds in `planRead` and then took the process out with a
-        // heap OOM rather than ever reaching the network.
-        assertReadArgs(url, length, range.start)
-        const buffer = await this.cachedRange(url, range.start, length, init)
-        return new Response(buffer, { status: 206 })
-      }
+    if (typeof url !== 'string') {
+      return super.fetch(url, init)
     }
-    return typeof url === 'string'
-      ? this.fetchWholeFile(url, init)
-      : super.fetch(url, init)
+    const range = parseByteRange(new Headers(init?.headers).get('range'))
+    if (!range) {
+      return this.fetchWithDeadline(url, init)
+    }
+    const length = range.end - range.start + 1
+    // The same guard `fetchBytes` applies, for the same reason one layer down.
+    // `parseByteRange` accepts any pair of digits, and the chunk machinery
+    // walks one iteration, promise and in-flight entry per CHUNK_SIZE of the
+    // length before its first await: measured, `bytes=0-99999999999999` spent
+    // 112 seconds in `planRead` and then took the process out with a heap OOM
+    // rather than ever reaching the network.
+    assertReadArgs(url, length, range.start)
+    const buffer = await this.cachedRange(url, range.start, length, init)
+    return new Response(buffer, { status: 206 })
   }
 
   // counted like a range body, so a deadline elsewhere on this origin can tell
@@ -260,37 +269,6 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       return await super.readFileBody(...args)
     } finally {
       release()
-    }
-  }
-
-  /**
-   * `super.fetch` for a whole-file read, under the same response deadline the
-   * range path uses.
-   *
-   * It reaches here from `RemoteFile.readFile`, which sends no range header, so
-   * before this it was the one HTTP path in the class with no clock on it at
-   * all — and the one where waiting forever is most visible, because a
-   * whole-file read is what an assembly's chrom.sizes, chromAlias and cytoband
-   * files are. A hub that accepted the connection and went silent left the
-   * caller with a spinner and no error, indefinitely.
-   *
-   * The deadline is safe here for exactly the reason it is safe there: it bounds
-   * the wait for the response, and is stood down the moment the headers arrive.
-   * A whole-file body is routinely large and may take as long as it takes.
-   */
-  private async fetchWholeFile(url: string, init: RequestInit | undefined) {
-    const deadline = withResponseDeadline(
-      init?.signal,
-      seconds =>
-        `No response from ${url} after ${seconds}s (the connection was open and the server sent nothing; a transfer already under way is not subject to this limit, so this is a stalled request rather than a slow one)`,
-      url,
-    )
-    try {
-      return await super.fetch(url, { ...init, signal: deadline.signal })
-    } catch (e) {
-      throw describeFetchFailure(e, deadline, url, url)
-    } finally {
-      deadline.stop()
     }
   }
 }
