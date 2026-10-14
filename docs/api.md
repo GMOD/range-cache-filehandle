@@ -1,15 +1,16 @@
 # API
 
-Eleven exports: two filehandles, three cache controls, and the six constants.
+The package has eleven exports: two filehandles, three cache controls, and six
+constants.
 
 ## `new RemoteFileWithRangeCache(url, opts?)`
 
 A `RemoteFile` from
 [generic-filehandle2](https://github.com/GMOD/generic-filehandle2) whose reads
-go through the chunk cache. Same constructor, same options: `headers`,
-`overrides`, `signal`, and a custom `fetch`. Static credentials go in `headers`;
-`fetch` is for the ones that have to be computed per request, such as a signed
-URL that refreshes.
+go through the chunk cache. It takes the same constructor arguments and options
+as `RemoteFile`: `headers`, `overrides`, `signal`, and a custom `fetch`. Static
+credentials go in `headers`; `fetch` is for the ones that have to be computed
+per request, such as a signed URL that refreshes.
 
 ```js
 const file = new RemoteFileWithRangeCache(url, {
@@ -17,75 +18,76 @@ const file = new RemoteFileWithRangeCache(url, {
 })
 ```
 
-The URL is the cache key, so two instances on the same URL share chunks. That
-makes a second handle on a file cheap rather than a duplicate — two tracks on
-one BAM, or a parser you handed a URL rather than a filehandle and which built
-its own.
+The URL is the cache key, so two instances on the same URL share chunks. A
+second handle on a file therefore reuses the chunks the first one fetched, for
+example for two tracks on one BAM, or for a parser that you handed a URL rather
+than a filehandle and that built its own.
 
 Four methods behave differently from the base class.
 
 ### `read(length, position, opts?)`
 
-Bytes from the chunk cache, assembling and fetching as
+Returns bytes from the chunk cache, which assembles and fetches them as
 [dataflow.md](dataflow.md) describes. `RemoteFile.read` validates the arguments,
 answers a zero length itself and hands the rest to `fetchBytes`, which this
-class overrides to read from the cache rather than unwrap a `Response` — that
-round trip is three copies of the range, 69-77% of a warm read. The override
-also refuses a length past what a `Uint8Array` can hold.
+class overrides to read from the cache instead of unwrapping a `Response`. A
+`Response` round trip copies the range three times and takes 69-77% of a warm
+read. The override also rejects a length larger than a `Uint8Array` can hold.
 
-Every request this class sends, the `stat()` probe included, is built by
-`RemoteFile.buildRequest`, so `headers`, `overrides` and `signal` from the
-constructor and from `opts` merge the way the base class merges them:
-`overrides` beats the method/redirect/mode defaults, `opts` beats the
-constructor, `opts.signal` beats a signal supplied through `overrides`, and a
-header name matches however it is capitalized.
+`RemoteFile.buildRequest` builds every request this class sends, the `stat()`
+probe included, so `headers`, `overrides` and `signal` from the constructor and
+from `opts` merge the way the base class merges them: `overrides` beats the
+method/redirect/mode defaults, `opts` beats the constructor, `opts.signal` beats
+a signal supplied through `overrides`, and a header name matches however it is
+capitalized.
 
-A subclass that overrides `fetchBytes` takes the cache off the path. Override
-`fetch` to change how requests are made.
+A subclass that overrides `fetchBytes` bypasses the cache. Override `fetch` to
+change how requests are made.
 
 ### `fetch(url, init?)`
 
-Still cached, one layer lower: a string URL plus a single-range
-`bytes=start-end` header is served from the cache and returned as a
-synthetic 206. Anything else — a `Request` object, an open-ended `bytes=100-`, a
-multi-range header, no range at all — goes straight to `RemoteFile.fetch`.
+`fetch` also goes through the cache, one layer lower. The cache answers a
+request that has a string URL and a single-range `bytes=start-end` header with a
+synthetic 206. Any other request goes straight to `RemoteFile.fetch`: a
+`Request` object, an open-ended `bytes=100-`, a multi-range header, or no range
+at all.
 
 The cache therefore covers a caller that builds its own range requests, and
 leaves a caller that streams a whole file unaffected.
 
-Two differences from `RemoteFile.fetch` on the cached path. A status the range
-machinery cannot read as the bytes that were asked for **throws** rather than
-coming back as a `Response` to inspect — [errors.md](errors.md) has the status
-hints this makes possible, and the uncached path still returns its `Response`
-for any status. And the synthetic 206 carries the bytes, not the headers: no
-`Content-Range`, no `Content-Length`. Read the size with `stat()`.
+On the cached path, `fetch` differs from `RemoteFile.fetch` in two ways. First,
+a status that the cache cannot read as the requested bytes **throws** rather
+than coming back as a `Response` to inspect. The thrown error includes the
+status hints listed in [errors.md](errors.md); the uncached path still returns
+its `Response` for any status. Second, the synthetic 206 contains the bytes but
+no `Content-Range` or `Content-Length` header, so read the size with `stat()`.
 
 ### `stat()`
 
-`{ size }`, from the size cache when a range request has already observed
-`Content-Range`, and otherwise from one zero-length range request issued for the
-purpose.
+Resolves to `{ size }`, taken from the size cache when an earlier range request
+has already read `Content-Range`, and otherwise from one zero-length range
+request made for the purpose.
 
-That probe is the smallest range there is, so a server with no range support
-answers it with the entire file. Up to one 256 KiB chunk of that is read and its
-length taken as the size — a file that small is served whole by any request, so
-such a server works here one chunk at a time. Past the ceiling the probe fails
-with the 200 message from [errors.md](errors.md#a-status-came-back), which names
-the missing range support rather than the `Content-Range` header below.
-`Content-Length` is not consulted: cross-origin it can be a compressed count
-with the `Content-Encoding` that would have said so hidden by CORS.
+A server with no range support answers that probe, the smallest range there is,
+with the entire file. The probe reads up to one 256 KiB chunk of the body and
+takes its length as the size. Any request returns a file that small whole, so
+the package can still serve a small file from such a server, one chunk at a
+time. Past that ceiling the probe fails with the 200 message from
+[errors.md](errors.md#a-status-came-back), which names the missing range support
+rather than the `Content-Range` header below. `stat()` ignores `Content-Length`,
+because cross-origin it can be a compressed count, and CORS hides the
+`Content-Encoding` header that would say so.
 
-**It throws rather than reporting `size: 0`** when the server answered but the
-header was not readable — the CORS misconfiguration that is invisible in the
-network tab. [errors.md](errors.md#the-one-that-succeeds-and-still-fails) has
-the reasoning and the header to add. Wrap it in a `try`/`catch` if your caller
-can degrade.
+**`stat()` throws rather than reporting `size: 0`** when the server answered but
+`Content-Range` was unreadable, a CORS misconfiguration that the network tab
+does not show. [errors.md](errors.md#the-one-that-succeeds-and-still-fails) has
+the reasoning and the header to add. Wrap the call in a `try`/`catch` if your
+caller can work without a size.
 
 ### `protected recordSize(size)`
 
-**The extension point for a subclass that answers `stat()` from somewhere
-else.** A cloud provider's metadata endpoint, say. Call it with the size you
-learned:
+**A subclass that answers `stat()` from another source calls `recordSize`**, for
+example after reading a cloud provider's metadata endpoint. Pass it the size:
 
 ```js
 class GoogleDriveFile extends RemoteFileWithRangeCache {
@@ -97,102 +99,102 @@ class GoogleDriveFile extends RemoteFileWithRangeCache {
 }
 ```
 
-Without it the size cache stays empty for that URL however many times `stat()`
-is called, and the clamp in [dataflow.md](dataflow.md#clamping) never engages.
-`@gmod/bam` and `@gmod/tabix` compute their last read to cover the whole final
-BGZF block, so it runs past EOF by construction — the clamp is not an
-optimization there, it is the difference between the last block reading and the
-server answering 416.
+Without `recordSize`, the size cache stays empty for that URL however many times
+`stat()` is called, so the clamp in [dataflow.md](dataflow.md#clamping) never
+applies. `@gmod/bam` and `@gmod/tabix` size their last read to cover the whole
+final BGZF block, so that read always runs past EOF. Without the clamp, the
+server answers it with a 416 instead of the last block.
 
-A non-finite size is ignored rather than stored. A metadata endpoint that
-populates `size` only for real files — not folders, shortcuts or native editor
-documents — makes `Number(undefined)` a reachable input, and a `NaN` in the size
-cache poisons rather than fails: every later read of that file would return
-empty with nothing said.
+`recordSize` ignores a non-finite size. A metadata endpoint may set `size` only
+for real files and leave it out for folders, shortcuts and native editor
+documents, so `Number(undefined)` is a reachable input. A `NaN` in the size
+cache would raise no error, and every later read of that file would return
+empty.
 
 ## `new CachedFilehandle(inner, key)`
 
-The chunk cache sits in front of any `GenericFilehandle` — a `LocalFile`, a
-`BlobFile`, or your own implementation. Nothing in the cache is about HTTP.
+`CachedFilehandle` puts the chunk cache in front of any `GenericFilehandle`,
+such as a `LocalFile`, a `BlobFile`, or your own implementation. The cache
+contains no HTTP-specific code.
 
 ```js
 const file = new CachedFilehandle(new LocalFile(path), `file://${path}`)
 ```
 
 `key` namespaces this file's chunks in the module-global cache, so **it has to
-identify the underlying bytes**. A path or URL for anything with a stable name;
-something instance-unique for a `Blob`, which has none. Two wrappers sharing a
-key share chunks — right for two handles on one path, wrong for two unrelated
-blobs.
+identify the underlying bytes**. Use a path or URL for anything with a stable
+name, and something unique to the instance for a `Blob`, which has no name. Two
+wrappers with the same key share chunks, which is right for two handles on one
+path and wrong for two unrelated blobs.
 
-`read` and `stat` go through the cache; `readFile` and `close` pass through
-untouched, and `source` delegates. A size from `stat` is recorded so past-EOF
-reads clamp, except a size of 0 from stats without `mtimeMs`: a `RemoteFile`
-answers `{ size: 0 }` when it cannot see Content-Range, and recording that would
-empty every read. A genuinely empty Blob still reads as empty, from its inner
-handle.
+`read` and `stat` go through the cache, while `readFile`, `close` and `source`
+pass straight to the inner handle. `CachedFilehandle` records a size from `stat`
+so past-EOF reads clamp, except a size of 0 from stats without `mtimeMs`. A
+`RemoteFile` answers `{ size: 0 }` when it cannot see `Content-Range`, and
+recording that would make every read empty. An empty Blob still reads as empty,
+from its inner handle.
 
-Delegating rather than returning `key` is deliberate, and the `Blob` case is
-why. A key is invented where there is no name; `source` is an address someone
-can go and look at, so a wrapper around a `Blob` reports `undefined`, and a
-slow-read log shows nothing rather than an id it made up.
+`source` comes from the inner handle rather than from `key` on purpose, because
+of the `Blob` case. A caller invents a key where there is no name, while
+`source` is an address someone can look up, so a wrapper around a `Blob` reports
+`undefined`, and a slow-read log shows nothing rather than an invented id.
 
-Worth knowing that a local file may not need this at all. The cache provides
-request coalescing, and a `LocalFile` read is a positional read on an
-already-open descriptor — there is no request to coalesce. It still helps with
-reuse: a re-read of a region already in the grid does no syscall, at a cost of
-256 KiB resident per touched region.
+A local file may not need `CachedFilehandle` at all. The cache coalesces
+requests, and a `LocalFile` read is a positional read on an already-open
+descriptor, so there is no request to coalesce. The cache still helps with
+reuse, because a re-read of a region already in the grid makes no syscall, at a
+cost of 256 KiB resident per touched region.
 
 ## `sweepIdleCache()`
 
-Drop every chunk no read has touched for `CACHE_IDLE_TIMEOUT_MS`. Safe at any
-moment, including mid-fetch: a read holds its own references to the chunks it
-will assemble, and a chunk dropped from under it is simply re-fetched.
+Drop every chunk no read has touched for `CACHE_IDLE_TIMEOUT_MS`. The call is
+safe at any moment, including mid-fetch, because a read holds references to the
+chunks it will assemble, and the read re-fetches a chunk the sweep dropped.
 
-An interval already calls this. Call it yourself to reclaim earlier on an event
-the library cannot see — a tab going hidden, a track closing, a request
-finishing on a server.
+The library already calls `sweepIdleCache()` on an interval. Call it yourself to
+free memory sooner after an event the library cannot see, such as a tab going
+hidden, a track closing, or a request finishing on a server.
 
-Deliberately narrower than `clearCache`: it leaves in-flight fetches and queued
-reads alone, since those are by definition active, and keeps the size cache,
-which is one number per file and costs a round trip to re-derive.
+`sweepIdleCache()` is deliberately narrower than `clearCache`. It leaves
+in-flight fetches and queued reads alone, since those are by definition active,
+and keeps the size cache, which holds one number per file and costs a round trip
+to re-derive.
 
 ## `clearCache()`
 
-Drop every cached chunk and every known size. Mostly for tests, which need each
-case to start empty, and for a consumer that knows it is finished with
-everything it has opened.
+Drop every cached chunk and every known size. The call is mostly for tests,
+which need each case to start empty, and for a consumer that has finished with
+everything it opened.
 
 `clearCache` does not cancel work in flight, reject queued reads, or touch the
 concurrency pools. A read already running or queued for a slot gets its bytes,
 settling in turn as slots free, but those bytes do not repopulate the emptied
-cache. To actually stop work, abort the signals you passed to it.
+cache. To stop the work, abort the signals you passed to it.
 
-Because the pools keep their counts, a transfer that has wedged mid-body stays
-wedged across a clear. That is the cost of putting no clock on a transfer; a
-server that never answers at all is still covered by `RESPONSE_TIMEOUT_MS`.
+Because the pools keep their counts, a transfer stalled mid-body stays stalled
+after a clear. That follows from setting no time limit on a transfer;
+`RESPONSE_TIMEOUT_MS` still covers a server that never answers at all.
 
 ## `clearCacheFor(key)`
 
-Drop one file's cached chunks and its known size, leaving every other file alone
-— what a consumer closing one track needs, where `clearCache()` is too blunt.
-The key is the same one the file was opened with — the URL for a
-`RemoteFileWithRangeCache`, the second constructor argument for a
+Drop one file's cached chunks and its known size, leaving every other file
+alone. A consumer closing one track needs this, where `clearCache()` would drop
+every file. The key is the one the file was opened with: the URL for a
+`RemoteFileWithRangeCache`, and the second constructor argument for a
 `CachedFilehandle`.
 
-Like `clearCache`, it does not cancel work in flight: a read still waiting on a
-request is entitled to the bytes it asked for, and that request cleans up after
-itself. What such a request no longer does is repopulate the cache when it lands
-— otherwise clearing a file that had a read in flight put it straight back.
+Like `clearCache`, it does not cancel work in flight, because a read still
+waiting on a request should get the bytes it asked for, and that request cleans
+up after itself. The request does not put its chunks back in the cache when it
+completes, so a file cleared while a read was in flight stays cleared.
 
 ## Constants
 
 `CHUNK_SIZE`, `MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT`,
 `MAX_SIZE_ENTRIES` and `RESPONSE_TIMEOUT_MS` are exported for reading, not
-setting — the cache is module-global, so a knob on one filehandle would be
-policy for every other one in the process. [tuning.md](tuning.md) is what each
-is and what measured it.
+setting. The cache is module-global, so a setting on one filehandle would apply
+to every other one in the process. [tuning.md](tuning.md) explains each constant
+and the measurement behind it.
 
-Reading them is genuinely useful, though. `CHUNK_SIZE` is the granularity your
-reads are rounded to, so it is the number to compare an index's chunk sizes
-against when deciding how much of a file a query really costs.
+`CHUNK_SIZE` is the granularity your reads are rounded to, so compare an index's
+chunk sizes against it to work out how much of a file a query costs.

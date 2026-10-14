@@ -1,163 +1,164 @@
-# Failing legibly
+# Errors
 
-This layer retries nothing: a failed range read becomes an error, and the reader
-decides. What the layer owes in exchange is an error that reports what happened,
-because the default answers — a bare `TypeError`, or a status number with no
-context — are what turn "this BAM does not load" into a support thread.
+The cache retries nothing. A failed range read becomes an error and the reader
+decides what to do, so the error has to report what happened. The default
+errors, a bare `TypeError` or a status number with no context, turn "this BAM
+does not load" into a support thread.
 
 Three kinds of failure reach a caller.
 
 ## A status came back
 
-The message carries the status, the URL and the byte range, which is already
+The message contains the status, the URL and the byte range, which is already
 more than `fetch` gives, plus a hint for the statuses where there is something
 to do about it.
 
 - **200** — the server ignored the Range header and sent the whole file. Some
   servers do this rather than clamping a range whose end runs past EOF. The body
   then starts at byte 0, but callers slice it at the offsets they asked for, so
-  every chunk past the first would be filled with data from the wrong position —
-  silently, showing up much later as something like `invalid bgzf header`. It is
-  tolerated only when the request started at 0, where the body genuinely covers
-  the requested bytes, **and only for as much of it as the range asked for**.
-  That second half is about memory rather than offsets: reading a body allocates
-  all of it, so without a ceiling, a `stat()` of a 100 GB BAM on a server with
-  no range support would allocate 100 GB to learn one number, and every 256 KiB
-  read would allocate it again. The body is read under a ceiling instead, and
-  the request fails the moment it goes past, so this message arrives instead of
-  the process dying of memory. A file that really is shorter than the request
-  still passes, since the whole of it _is_ the range — the ceiling is at least
-  one 256 KiB chunk, because the size probe asks for a single byte and every
-  file is bigger than that.
+  every chunk past the first would be filled with data from the wrong position,
+  with no error until something like `invalid bgzf header` shows up much later.
+  The cache accepts a 200 only when the request started at 0, where the body
+  covers the requested bytes, **and only for as much of it as the range asked
+  for**. The second condition limits memory. Reading a body allocates all of it,
+  so without a ceiling, a `stat()` of a 100 GB BAM on a server with no range
+  support would allocate 100 GB to learn one number, and every 256 KiB read
+  would allocate it again. The cache therefore reads the body under a ceiling
+  and fails the request the moment the body goes past it, so this message
+  appears instead of the process running out of memory. A file that really is
+  shorter than the request still passes, since the whole of it _is_ the range.
+  The ceiling is at least one 256 KiB chunk, because the size probe asks for a
+  single byte and every file is bigger than that.
 
-  The ceiling is measured against the bytes, not against `Content-Length`. That
-  header counts what is on the wire, so a `Content-Encoding` makes it the
-  compressed count — and `Content-Encoding` is not CORS-safelisted while
-  `Content-Length` is, so cross-origin the browser hides exactly the header that
-  would have said the number was unusable. Trusting it recorded a gzipped file's
-  compressed size as the size of the file. A chunked body, which is what nginx
-  sends the moment it gzips, declares no length at all. Only counting the bytes
-  gives the real number.
+  The cache measures the ceiling against the bytes it reads, not against
+  `Content-Length`. That header counts the bytes on the wire, so with a
+  `Content-Encoding` it is the compressed count. `Content-Encoding` is not
+  CORS-safelisted while `Content-Length` is, so cross-origin the browser hides
+  the one header that would show the number is unusable. When the code trusted
+  `Content-Length`, it recorded a gzipped file's compressed size as the size of
+  the file. A chunked body, which nginx sends whenever it gzips, declares no
+  length at all.
 
 - **401 / 403** — the file is there and the request was refused. A signed URL
   may have expired, or a bucket policy may not grant read to the page origin.
 - **404** — check the URL, and that the index sits where the reader expects it
   alongside the data file.
-- **429 or 5xx** — the server is failing or declining just now, and since
-  nothing retries automatically, trying again is the caller's move.
+- **429 or 5xx** — the server is failing or refusing requests for now, and since
+  nothing retries automatically, the caller decides whether to try again.
 - **416** — not an error at all here. Range Not Satisfiable means the range
   starts past the end, and RFC 9110 has the server report the real length as
-  `bytes */12345`. That size is the one thing the response carries worth
-  keeping: it lets every later over-read be clamped instead of refused again,
-  and it is the only way `stat()` can answer for an empty file, every range of
-  which is unsatisfiable. The read returns empty.
+  `bytes */12345`. The cache keeps that size, the only useful content of the
+  response. The size lets the cache clamp every later over-read instead of
+  having it refused again, and it is the only way `stat()` can answer for an
+  empty file, every range of which is unsatisfiable. The read returns empty.
 
 ## No status came back
 
 A CORS denial, a mixed-content block, a DNS failure, a refused connection and an
-offline browser all arrive as the same bare `TypeError` — `Failed to fetch` in
+offline browser all reject with the same bare `TypeError` (`Failed to fetch` in
 Chrome, `Load failed` in Safari,
-`NetworkError when attempting to fetch resource` in Firefox — with no status, no
-headers and no URL. The browser withholds the difference deliberately: an error
+`NetworkError when attempting to fetch resource` in Firefox), with no status, no
+headers and no URL. The browser hides the cause deliberately, because an error
 that named the cause would itself be a cross-origin read.
 
-The hint names the two that are checkable from inside the page, and then the one
+The hint checks for the two causes a page can detect, and then names the cause
 that is left:
 
 1. `navigator.onLine === false` — the browser reports no network connection. The
    comparison is against `false` rather than a falsy test because node has had a
-   global `navigator` since 21 and it has no `onLine` at all, which made every
-   node-side network failure report as "no network connection" and swallowed the
-   triage below it.
-2. An `http:` URL on an `https:` page — the browser blocked it before it left,
-   and the file has to be served over https too.
+   global `navigator` since version 21 with no `onLine` property, so a falsy
+   test reported every node-side network failure as "no network connection" and
+   skipped the checks below it.
+2. An `http:` URL on an `https:` page — the browser blocked the request before
+   sending it, and the file has to be served over https too.
 3. Otherwise, most often CORS. The server must send
    `Access-Control-Allow-Origin`, and
    `Access-Control-Expose-Headers: Content-Range` as well or the size of the
    file cannot be read either. A host that is down, a DNS failure and a blocked
-   port look identical from here, so the message does not pick one.
+   port look identical from inside the page, so the message does not pick one.
 
-Detecting this at all takes walking the `cause` chain rather than checking the
-rejection's class: `RemoteFile.fetch` catches the `TypeError` first and rethrows
-a plain `Error` wrapping it (and, on Chrome's exact "Failed to fetch" wording,
-retries once through the cache to work around a Chrome CORS-cache bug). By the
-time it gets here the class is gone and the chain is the only thing that still
-shows what it was. The walk is depth-bounded, since a cause chain is not
-guaranteed acyclic.
+The code detects a network failure by walking the `cause` chain rather than by
+checking the rejection's class, because `RemoteFile.fetch` catches the
+`TypeError` first and rethrows a plain `Error` wrapping it (and, on Chrome's
+exact "Failed to fetch" wording, retries once through the cache to work around a
+Chrome CORS-cache bug). By the time the error reaches this code its class is
+`Error`, and only the chain still holds the original `TypeError`. The walk is
+depth-bounded, since a cause chain is not guaranteed acyclic.
 
-One guard on top: the hint is suppressed when the deadline signal aborted, so an
-implementation that reports a cancellation as a `TypeError` cannot have a
-cancelled pan explained as a CORS misconfiguration — the worst place to be
-confidently wrong.
+The code also suppresses the hint when the deadline signal aborted. An
+implementation may report a cancellation as a `TypeError`, and without that
+check the message would explain a cancelled pan as a CORS misconfiguration.
 
 ## No answer came back
 
-A connection that is open and silent for 30 seconds fails with a message saying
-so, and saying that a transfer already under way is not subject to the limit, so
-this is a stalled request rather than a slow one. [tuning.md](tuning.md) has why
-the deadline covers the response rather than the transfer.
+A connection that stays open with no response for 30 seconds fails with a
+message that says so. The message also says that the limit does not apply to a
+transfer already under way, so the request stalled rather than ran slowly.
+[tuning.md](tuning.md) explains why the deadline covers the response rather than
+the transfer.
 
-On the range path the deadline lives on the shared request rather than on each
-reader, because `fetchRun` coalesces every reader of those chunks onto one fetch
-— one stalled reader with a deadline of its own would strand the rest on a fetch
-nobody is watching any more. A whole-file read is nobody's but its own, so it
-carries its own.
+On the range path the deadline belongs to the shared request rather than to each
+reader, because `fetchRun` coalesces every reader of those chunks onto one
+fetch. If one reader with its own deadline gave up on a stalled fetch, the other
+readers would be left waiting on it with no deadline at all. A whole-file read
+has one reader, so it has its own deadline.
 
 The message names the range on the range path and the file on the whole-file
 one, which is also how you can tell which of the two you are looking at.
 
-The seconds in the message are the whole wait. A request the browser held in its
-per-host queue behind six streaming bodies waits longer than 30 seconds before
-it is reported; [tuning.md](tuning.md#requests-the-browser-has-queued) has the
-rule.
+The seconds in the message count the whole wait. A request the browser held in
+its per-host queue behind six streaming bodies waits longer than 30 seconds
+before it is reported; [tuning.md](tuning.md#requests-the-browser-has-queued)
+has the rule.
 
 ## The one that succeeds and still fails
 
-`stat()` throws rather than returning `size: 0` when the request came back fine
-but no `Content-Range` carrying a length came with it. Returning zero
-misrepresents the failure, tending to make downstream callers issue zero-byte
+`stat()` throws rather than returning `size: 0` when the request succeeded but
+its response had no `Content-Range` with a length. A size of zero would
+misrepresent the failure, because downstream callers tend to issue zero-byte
 reads or treat the file as empty, and the failure then appears nowhere near its
 cause.
 
-The usual cause is the one CORS misconfiguration invisible from the network tab:
-the header is on the wire and the browser will not let the page read it. The
-message names the header to add — and names the other cause with it, since a
-server answering `bytes 0-0/*` has exposed the header correctly and simply
-declined to give a total, and being sent to expose a header it already exposes
-is an afternoon lost. A caller that can degrade gracefully should wrap `stat()`
-in a `try`/`catch`.
+The usual cause is a CORS misconfiguration that the network tab does not show,
+because the header is on the wire but the browser will not let the page read it.
+The message names the header to add, and also names the other cause. A server
+answering `bytes 0-0/*` has exposed the header correctly and declined to give a
+total, and a developer told only to expose the header could lose an afternoon
+exposing one the server already exposes. A caller that can work without a size
+should wrap `stat()` in a `try`/`catch`.
 
-## The one nothing here can check
+## Checking a range response
 
-A range response is checked against its `Content-Range`: the header has to
-describe a real range of a file that size, it has to be the range that was asked
+The cache checks a range response against its `Content-Range`. The header has to
+describe a real range of a file that size and has to be the range that was asked
 for, and the body has to be as long as the header declares and reach either the
-end asked for or the end of the file. A body shorter than the range it claims is
-what that last pair is for — nothing downstream can tell a truncated response
+end asked for or the end of the file. The last two checks catch a body shorter
+than the range it claims. Code downstream cannot tell such a truncated response
 from the end of the file, since a short chunk _is_ how this package represents
 EOF.
 
-The length half of that is also a ceiling on what gets held: a body is read only
-as far as the range the header declared, so a proxy that answers a 256 KiB
-request with an honest `Content-Range` and then streams the whole file is
-stopped at the ceiling rather than allocated in full and rejected afterwards.
+The length check also caps memory. The cache reads a body only as far as the
+range the header declared. If a proxy answers a 256 KiB request with an honest
+`Content-Range` and then streams the whole file, the cache stops reading at the
+ceiling rather than allocating the whole body and rejecting it afterwards.
 
-**A `Content-Encoding` puts the length half of that out of reach.** The bytes on
-the wire are then not the bytes of the range, so their count means nothing, and
-the two length checks are skipped. The header checks still run — a response that
-contradicts itself, or that describes some other range, is rejected however it
-is encoded — but a proxy that truncates an encoded body has nothing left to
-catch it, and a truncated body lands in the cache as a file that ends early.
+**With a `Content-Encoding`, the cache cannot check the length.** The bytes on
+the wire are then not the bytes of the range, so their count says nothing about
+the range, and the cache skips the two length checks. The header checks still
+run, so the cache rejects a response that contradicts itself or describes some
+other range, however it is encoded. A proxy that truncates an encoded body,
+though, passes every remaining check, and the cache stores the truncated body as
+a file that ends early.
 
-Worth knowing rather than worth fixing: a server that compresses a byte range is
-already unusual, and the reader has no way to distinguish the honest form (the
-range's own bytes, compressed) from the broken one. If a file reads short from
-one host and not another, compare `Content-Encoding` on the range responses.
+We leave this unfixed, because a server that compresses a byte range is already
+unusual, and the reader has no way to distinguish the honest form (the range's
+own bytes, compressed) from the broken one. If a file reads short from one host
+and not another, compare `Content-Encoding` on the range responses.
 
-## Not an error, but worth knowing
+## Invalid offsets and lengths
 
 A `read()` with a `NaN` length or position throws a `TypeError` naming the file,
-rather than becoming a `bytes=NaN-NaN` request. It arrives from a corrupt or
+rather than becoming a `bytes=NaN-NaN` request. A `NaN` comes from a corrupt or
 truncated index, and the message names the cause. The same guard covers a
 negative or fractional offset, a length past what a `Uint8Array` can hold, and a
 `Range` header handed to `fetch()` asking for any of those.
