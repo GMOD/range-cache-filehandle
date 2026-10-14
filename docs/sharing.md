@@ -96,7 +96,7 @@ every read, so a pool per URL would be a new pool each time and cap nothing.
 
 `stat()` goes through the pool too, because it is a real request against the
 same server, so N readers opening at once do not issue N stats outside the cap.
-`stat()` also goes through `oncePerKey`, so those N readers share one request
+`stat()` also goes through `probeSize`, so those N readers share one request
 rather than making N of them for one number.
 
 `clearCache` leaves the pools alone. A read queued for a slot when the cache is
@@ -123,7 +123,7 @@ handle has a `fetch` that signs its requests and another has a plain one, the
 handle that opens the run decides which `fetch` sends the request. The other
 handle reads the bytes that request returned, and the cache serves every later
 read without running either `fetch`. `stat()` shares the same way, through
-`oncePerKey`.
+`probeSize`.
 
 The cache cannot separate such handles itself, because a `fetch` implementation
 is a closure with no identity to key on. Where the separation matters, open the

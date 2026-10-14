@@ -81,6 +81,14 @@ interface Pool {
 }
 
 /**
+ * The bytes of a range, and the file's total length if the answer told us it.
+ */
+export interface FetchedRange {
+  bytes: Uint8Array
+  total?: number
+}
+
+/**
  * Fetches an inclusive byte range `[start, end]`, however the underlying source
  * does that. The one thing the chunk cache needs from a file.
  */
@@ -88,7 +96,16 @@ export type FetchByteRange = (
   start: number,
   end: number,
   init?: RequestInit,
-) => Promise<Uint8Array>
+) => Promise<FetchedRange>
+
+/**
+ * A `stat` request in flight. `stale` works as on {@link RunState}: a clear
+ * during the request stops it recording the size it learns.
+ */
+interface SizeProbe {
+  size: Promise<number | undefined>
+  stale: boolean
+}
 
 let cache = new Map<string, CacheEntry>()
 /**
@@ -111,11 +128,8 @@ let sizeCache = new Map<string, number>()
 let inFlight = new Map<string, InFlightChunk>()
 /** one {@link Pool} per origin (per key for a non-http URL), created on demand and dropped when it empties */
 const pools = new Map<string, Pool>()
-/**
- * Lookups that must happen once per key however many callers ask at once —
- * `stat`, in practice. See {@link oncePerKey}.
- */
-let singleFlight = new Map<string, Promise<unknown>>()
+/** size probes in flight, one per key; see {@link probeSize} */
+let probes = new Map<string, SizeProbe>()
 
 function cacheKey(key: string, chunkIndex: number) {
   return `${key}:${chunkIndex}`
@@ -277,29 +291,32 @@ function stopSweep() {
 export function clearCache() {
   cache = new Map<string, CacheEntry>()
   sizeCache = new Map<string, number>()
-  singleFlight = new Map<string, Promise<unknown>>()
+  markStale(probes.values())
+  probes = new Map<string, SizeProbe>()
   // the new cache is empty, so nothing is left for the sweep to find; putCached
   // starts it again with the next chunk
   stopSweep()
   // A leaked fetch that settles after this still removes its own entry from the
   // new map only if it is still the owner, so dropping the old map is safe. It
   // would still repopulate the cache, though, which is what stale stops.
-  markStale(inFlight.values())
+  markStale(Array.from(inFlight.values(), entry => entry.run))
   inFlight = new Map<string, InFlightChunk>()
 }
 
 /**
- * Take the runs behind `entries` out of the cache's future.
+ * Take requests in flight out of the cache's future.
  *
  * A clear cannot cancel work in flight — a reader waiting on it asked before
- * the clear and is entitled to its bytes — but without this the run's
- * `putCached` lands after the clear and puts the file straight back. Measured:
- * one read, `clearCacheFor` while it was in flight, and the next read of the
- * same offset was served from the cache that had just been emptied.
+ * the clear and is entitled to its bytes — but without this the request lands
+ * after the clear and puts the file straight back: its chunks, and its size.
+ * Measured: one read, `clearCacheFor` while it was in flight, and the next read
+ * of the same offset was served from the cache that had just been emptied. A
+ * size put back is worse, because nothing overwrites it: a file that grew stays
+ * clamped to its old length.
  */
-function markStale(entries: Iterable<InFlightChunk>) {
+function markStale(entries: Iterable<{ stale: boolean }>) {
   for (const entry of entries) {
-    entry.run.stale = true
+    entry.stale = true
   }
 }
 
@@ -325,6 +342,11 @@ export function clearCacheFor(key: string) {
     if (isChunkOf(chunkKey, key)) {
       entry.run.stale = true
     }
+  }
+  const probe = probes.get(key)
+  if (probe !== undefined) {
+    probe.stale = true
+    probes.delete(key)
   }
   sizeCache.delete(key)
   if (cache.size === 0) {
@@ -480,28 +502,44 @@ export async function limitConcurrency<T>(
 }
 
 /**
- * Run `fn` once per key however many callers ask for it at once, and let them
- * all await the same result.
+ * The file's size, from the size cache or else from `fetchSize`, which runs
+ * under the concurrency cap and once per key however many callers ask at once.
  *
- * `stat` is the caller. It is guarded by `hasSize`, but that guard only sees
- * sizes that have already arrived, so N handles opening a file together each
- * found the size missing and each issued its own request — measured, ten
- * concurrent `stat()` calls made ten requests for one number.
+ * Once per key because a check of the size cache only sees sizes that have
+ * already arrived, so N handles opening a file together each found the size
+ * missing and each issued its own request — measured, ten concurrent `stat()`
+ * calls made ten requests for one number.
  */
-export function oncePerKey<T>(key: string, fn: () => Promise<T>) {
-  const existing = singleFlight.get(key) as Promise<T> | undefined
-  if (existing !== undefined) {
-    return existing
+export async function probeSize(
+  key: string,
+  fetchSize: () => Promise<number | undefined>,
+) {
+  const known = getSize(key)
+  if (known !== undefined) {
+    return known
   }
-  const started = fn()
-  const forget = () => {
-    if (singleFlight.get(key) === started) {
-      singleFlight.delete(key)
+  let probe = probes.get(key)
+  if (probe === undefined) {
+    const started: SizeProbe = {
+      size: limitConcurrency(key, fetchSize),
+      stale: false,
     }
+    const forget = () => {
+      if (probes.get(key) === started) {
+        probes.delete(key)
+      }
+    }
+    started.size.then(size => {
+      if (!started.stale) {
+        recordSizeIfUnknown(key, size)
+      }
+      forget()
+    }, forget)
+    probes.set(key, started)
+    probe = started
   }
-  started.then(forget, forget)
-  singleFlight.set(key, started)
-  return started
+  const size = await probe.size
+  return getSize(key) ?? size
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +600,7 @@ export function getSize(key: string) {
  * already-known size is left alone (the file is not expected to change under us
  * mid-session).
  */
-export function recordSizeIfUnknown(key: string, size: number | undefined) {
+function recordSizeIfUnknown(key: string, size: number | undefined) {
   if (size !== undefined && !sizeCache.has(key)) {
     putSize(key, size)
   }
@@ -589,7 +627,7 @@ function fetchRun(
   // The request runs under the run's own signal, not the opening reader's: it
   // is shared, so it must outlive any one reader giving up. joinRun registers
   // them, starting with the reader that opened it.
-  const data = limitConcurrency(
+  const fetched = limitConcurrency(
     key,
     () => {
       // every reader gave up while this was queued, so there is nothing to ask
@@ -604,6 +642,14 @@ function fetchRun(
     // leaving it waiting for a slot it no longer wants
     state.controller.signal,
   )
+  // recorded before any chunk is published, which judges an empty chunk by
+  // whether the size puts it past EOF
+  const data = fetched.then(({ bytes, total }) => {
+    if (!state.stale) {
+      recordSizeIfUnknown(key, total)
+    }
+    return bytes
+  })
   joinRun(state, init?.signal)
   const settle = () => {
     state.settled = true

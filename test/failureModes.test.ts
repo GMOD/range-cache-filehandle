@@ -767,6 +767,54 @@ describe('clearCacheFor', () => {
     expect(log.length).toBe(2)
   })
 
+  // A file rewritten in place, longer. The server answers with the length the
+  // file had when the request arrived, and holds the answer until `release`.
+  function growingFile() {
+    const file = { size: CHUNK, release: () => {} }
+    const gate = new Promise<void>(resolve => {
+      file.release = resolve
+    })
+    const fetchImpl = async (_url: unknown, init?: RequestInit) => {
+      const size = file.size
+      await gate
+      const { start, end: asked } = requestedRange(init)
+      const end = Math.min(asked, size - 1)
+      return new Response(fileData.slice(start, end + 1), {
+        status: 206,
+        headers: { 'content-range': `bytes ${start}-${end}/${size}` },
+      })
+    }
+    return { file, fetchImpl }
+  }
+
+  test('a read in flight does not put the old size back afterwards', async () => {
+    const url = nextUrl()
+    const { file: served, fetchImpl } = growingFile()
+    const file = makeFile(url, fetchImpl)
+    const first = file.read(100, 0)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    served.size = FILE_SIZE
+    clearCacheFor(url)
+    served.release()
+    await first
+    expect(await file.stat()).toEqual({ size: FILE_SIZE })
+    expect((await file.read(100, 2 * CHUNK)).length).toBe(100)
+  })
+
+  test('a stat in flight does not put the old size back afterwards', async () => {
+    const url = nextUrl()
+    const { file: served, fetchImpl } = growingFile()
+    const file = makeFile(url, fetchImpl)
+    const first = file.stat()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    served.size = FILE_SIZE
+    clearCacheFor(url)
+    served.release()
+    // asked before the clear, so it gets the answer to what it asked
+    expect(await first).toEqual({ size: CHUNK })
+    expect(await file.stat()).toEqual({ size: FILE_SIZE })
+  })
+
   test('drops the size it learned, so stat asks again', async () => {
     const log: { start: number; end: number }[] = []
     const url = nextUrl()

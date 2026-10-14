@@ -173,8 +173,9 @@ one track. The key is the one the file was opened with: the URL for a
 
 Like `clearCache`, it does not cancel work in flight, because a read still
 waiting on a request should get the bytes it asked for, and that request cleans
-up after itself. The request does not put its chunks back in the cache when it
-completes, so a file cleared while a read was in flight stays cleared.
+up after itself. The request does not put its chunks or the file's size back in
+the cache when it completes, so a file cleared while a read or `stat()` was in
+flight stays cleared.
 
 ## Constants
 

@@ -1,14 +1,6 @@
 import { RemoteFile } from 'generic-filehandle2'
 
-import {
-  getCachedRange,
-  getSize,
-  hasSize,
-  limitConcurrency,
-  oncePerKey,
-  recordSize,
-  recordSizeIfUnknown,
-} from './chunkCache.ts'
+import { getCachedRange, probeSize, recordSize } from './chunkCache.ts'
 import { CHUNK_SIZE } from './constants.ts'
 import {
   isNetworkRejection,
@@ -25,6 +17,7 @@ import {
   readBodyAtMost,
 } from './util.ts'
 
+import type { FetchedRange } from './chunkCache.ts'
 import type { FilehandleOptions } from 'generic-filehandle2'
 
 /**
@@ -52,21 +45,13 @@ export class RemoteFileWithRangeCache extends RemoteFile {
   }
 
   async stat() {
-    if (!hasSize(this.url)) {
-      // Bypass the chunk cache: a populated chunk would otherwise short-circuit
-      // fetchRange, leaving the size cache empty. fetchRange always observes
-      // Content-Range and updates it directly. Still goes through
-      // limitConcurrency — a stat is a real request against the same server,
-      // and N readers opening at once used to issue N stats outside the cap —
-      // and through oncePerKey, so those N readers share one request rather
-      // than making N of them for one number.
-      await oncePerKey(this.url, () =>
-        limitConcurrency(this.url, () =>
-          this.fetchRange(this.url, 0, 0, this.buildRequest({})),
-        ),
-      )
-    }
-    const size = getSize(this.url)
+    // Bypasses the chunk cache, where a cached chunk would answer without the
+    // Content-Range that carries the size
+    const size = await probeSize(
+      this.url,
+      async () =>
+        (await this.fetchRange(this.url, 0, 0, this.buildRequest({}))).total,
+    )
     if (size === undefined) {
       // No Content-Range carrying a length came back. Throw rather than
       // silently returning size: 0 — that lie tends to cause downstream callers
@@ -103,13 +88,16 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     }
   }
 
-  /** the bytes of a response, once its status and its claims check out */
+  /**
+   * The bytes of a response, once its status and its claims check out, and the
+   * file's total length if the response gave it.
+   */
   private async readRange(
     res: Response,
     url: string,
     start: number,
     end: number,
-  ) {
+  ): Promise<FetchedRange> {
     if (res.status === 416) {
       // Range Not Satisfiable: requested range starts past end of file. RFC 9110
       // §15.5.17 has the server report the real length here, as `bytes * /12345`
@@ -123,32 +111,25 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       // The empty result is only cached as an EOF marker if the size it carried
       // confirms the range really was past the end; see isKnownPastEof. A 416
       // that explains nothing is answered, but not remembered.
-      recordSizeIfUnknown(
-        url,
-        parseContentRange(res.headers.get('content-range'))?.total,
-      )
+      const total = parseContentRange(res.headers.get('content-range'))?.total
       discardBody(res)
-      return new Uint8Array(0)
+      return { bytes: new Uint8Array(0), total }
     }
     assertServedTheRange(res, url, start, end)
-    // The first successful range fetch populates the size cache, so a later
-    // stat() needs no HEAD of its own.
     if (res.status === 200) {
       // no Content-Range on a 200, but the body is the entire file
-      const buffer = await readWholeFile(res, url, start, end)
-      recordSizeIfUnknown(url, buffer.byteLength)
-      return buffer
+      const bytes = await readWholeFile(res, url, start, end)
+      return { bytes, total: bytes.byteLength }
     } else {
       const range = parseContentRange(res.headers.get('content-range'))
-      const buffer = await readDeclaredRange(res, url, range)
-      // Validate before recording. A response this rejects has still told us a
-      // `total`, and recordSizeIfUnknown never overwrites, so recording first
-      // lets a proxy with a wrong Content-Range fix the size of the file at
-      // whatever it claimed — every later read clamped to it and stat()
-      // answering with it, for the life of the process.
-      assertBodyMatchesRange(res, url, start, end, buffer, range)
-      recordSizeIfUnknown(url, range?.total)
-      return buffer
+      const bytes = await readDeclaredRange(res, url, range)
+      // A response this rejects has still told us a `total`, and the size cache
+      // never overwrites one, so returning it lets a proxy with a wrong
+      // Content-Range fix the size of the file at whatever it claimed: every
+      // later read clamped to it and stat() answering with it, for the life of
+      // the process.
+      assertBodyMatchesRange(res, url, start, end, bytes, range)
+      return { bytes, total: range?.total }
     }
   }
 
