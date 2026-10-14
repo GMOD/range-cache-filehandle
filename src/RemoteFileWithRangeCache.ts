@@ -113,6 +113,14 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       // that explains nothing is answered, but not remembered.
       const total = parseContentRange(res.headers.get('content-range'))?.total
       discardBody(res)
+      if (total !== undefined && start < total) {
+        throw Object.assign(
+          new Error(
+            `HTTP 416 fetching ${url} bytes ${start}-${end}, which starts inside the ${total}-byte file the same response reports (the server refused a range it says exists, so an empty read here would pass for the end of the file; a caching proxy in front of the file is the usual cause)`,
+          ),
+          { status: 416 },
+        )
+      }
       return { bytes: new Uint8Array(0), total }
     }
     assertServedTheRange(res, url, start, end)

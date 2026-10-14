@@ -39,12 +39,14 @@ to do about it.
   alongside the data file.
 - **429 or 5xx** — the server is failing or declining just now, and since
   nothing retries automatically, the caller decides whether to try again.
-- **416** — not an error at all here. Range Not Satisfiable means the range
+- **416** — usually not an error here. Range Not Satisfiable means the range
   starts past the end, and RFC 9110 has the server report the real length as
   `bytes */12345`. The read returns empty, and the cache keeps that size, the
   only useful content of the response. The size lets the cache clamp every later
   over-read instead of having it refused again, and it is the only way `stat()`
-  can answer for an empty file, every range of which is unsatisfiable.
+  can answer for an empty file, every range of which is unsatisfiable. A 416
+  whose reported length puts the range _inside_ the file contradicts itself, so
+  the read fails: an empty read would pass for the end of the file.
 
 ## No status came back
 

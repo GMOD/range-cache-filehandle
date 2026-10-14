@@ -395,6 +395,24 @@ describe('416 that explains nothing is answered but not remembered', () => {
     expect(log.length).toBe(afterFirst)
   })
 
+  test('a 416 whose own size says the range exists is an error, not an EOF', async () => {
+    let calls = 0
+    const contradictory = async (url: unknown, init?: RequestInit) => {
+      calls++
+      return calls === 1
+        ? new Response('', {
+            status: 416,
+            headers: { 'content-range': `bytes */${FILE_SIZE}` },
+          })
+        : goodServer()(url as string, init)
+    }
+    const url = nextUrl()
+    const file = makeFile(url, contradictory)
+    await expect(file.read(100, CHUNK)).rejects.toMatchObject({ status: 416 })
+    // nothing from the refusal was kept
+    expect((await file.read(100, CHUNK)).length).toBe(100)
+  })
+
   test('and the size it reported is what stat answers with', async () => {
     const url = nextUrl()
     const file = makeFile(url, goodServer())
