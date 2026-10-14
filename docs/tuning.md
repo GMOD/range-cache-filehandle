@@ -70,10 +70,6 @@ such as when a tab goes hidden. The interval is still needed for an idle
 consumer, which calls nothing, so a check that ran only on the next cache access
 would never run for the reader who walked away.
 
-`clearCache()` drops every chunk and every known size. It leaves reads in flight
-or queued to finish under the concurrency cap, and is mostly for tests, which
-need each case to start empty.
-
 ## `RESPONSE_TIMEOUT_MS` bounds the wait for a response, not for the bytes
 
 `fetch` resolves when the response headers arrive, and the code clears the
@@ -85,10 +81,9 @@ whole transfer would cut that read off on any link slower than about 2 Mbps,
 turning a slow session into a broken one.
 
 The deadline catches a connection that is open and silent, the one failure that
-produces no error at all. From the reader's side a fetch is in flight and
-nothing looks wrong, so without the deadline the caller waits forever and never
-gets the error it would retry on. Thirty seconds is generous on purpose, because
-a server that has not begun to answer by then is unlikely to answer at all.
+produces no error at all, so without it the caller waits forever. Thirty seconds
+is generous on purpose, because a server that has not begun to answer by then is
+unlikely to answer at all.
 
 The deadline covers both HTTP paths: a range read, and a whole-file `readFile`,
 which sends no range header and so goes through the plain fetch. The whole-file
@@ -149,7 +144,7 @@ We chose every number above for this per-realm scoping, as jbrowse deploys it: a
 browser session panning a track, where the same person reads the same region
 again a minute later and 256 MB of a device's memory is a reasonable ask.
 
-Consider two other deployment patterns before taking the defaults.
+Consider these other deployments before taking the defaults.
 
 **A long-lived server process** shares one cache across every request it serves,
 keyed by URL. Sharing helps when many requests hit the same few files, and only

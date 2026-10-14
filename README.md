@@ -43,9 +43,6 @@ const file = new CachedFilehandle(new LocalFile(path), `file://${path}`)
 
 <img src="docs/img/chunks.svg" alt="A read spanning five 256 KiB chunks: one is cached, one is already being fetched by another read, and the three that are missing become two range requests" width="660">
 
-The picture comes from running the cache, and its range headers are the ones
-that read sent, as [CONTRIBUTING.md](CONTRIBUTING.md#docs) describes.
-
 - Serves reads from a 256 KiB chunk grid. The chunks a read is missing are
   grouped into contiguous runs, one request each.
 - Joins a chunk another read has in flight rather than requesting it again.
@@ -63,49 +60,27 @@ that read sent, as [CONTRIBUTING.md](CONTRIBUTING.md#docs) describes.
 - Names a cause on failure: CORS, mixed content, a server ignoring the Range
   header, a connection that goes 30s without answering.
 
-Timeouts and retries:
+The cache never retries a request and sets no time limit on a transfer, only on
+the wait for a response to begin. To stop a read, abort the `AbortSignal` you
+passed it; the cache passes the signal through to the socket.
 
-- This layer never retries a request.
-- **It sets no time limit on a transfer.** A run of chunks becomes one large
-  request, so a duration limit would cut off a slow download rather than a
-  broken one. `fetch`
-  [has no timeout of its own](https://github.com/whatwg/fetch/issues/951) for
-  the same reason.
-- To stop a read, abort the `AbortSignal` you passed it. The cache passes the
-  signal through to the socket.
-
-The concurrency cap is per origin:
-
-- One unresponsive server cannot starve the others, as with any
-  [per-endpoint semaphore](https://copdips.com/2023/01/python-aiohttp-rate-limit.html).
-- It is per origin and not per URL, because a presigned URL rotates its
-  signature on every read.
-
-[docs/dataflow.md](docs/dataflow.md) has the diagram and walks one read through
-all of it.
+[docs/dataflow.md](docs/dataflow.md) walks one read through all of it.
 
 ## Tuning
 
 `CHUNK_SIZE`, `MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT` and
-`RESPONSE_TIMEOUT_MS` are exported for reading, not setting. The cache is
-module-global, so a setting on one filehandle would change every other
-filehandle in the process.
-
-`src/constants.ts` and [docs/tuning.md](docs/tuning.md) give the measurements
-behind each.
+`RESPONSE_TIMEOUT_MS` are exported for reading, not setting, because the cache
+is module-global. [docs/tuning.md](docs/tuning.md) gives the measurements behind
+each.
 
 ## Docs
 
-- [docs/api.md](docs/api.md) — every export, and the `recordSize` hook a
-  subclass with its own `stat()` needs
-- [docs/optimizations.md](docs/optimizations.md) — what cuts the request count,
-  and what each step was measured to be worth
-- [docs/dataflow.md](docs/dataflow.md) — how a read flows, with the diagram
-- [docs/sharing.md](docs/sharing.md) — one request, several readers, and whose
-  abort cancels it
-- [docs/tuning.md](docs/tuning.md) — the six constants, what measured them, and
-  what changes outside a browser
-- [docs/errors.md](docs/errors.md) — what each failure reports and why
+- [docs/api.md](docs/api.md) — every export
+- [docs/optimizations.md](docs/optimizations.md) — what cuts the request count
+- [docs/dataflow.md](docs/dataflow.md) — how a read flows
+- [docs/sharing.md](docs/sharing.md) — shared requests and aborts
+- [docs/tuning.md](docs/tuning.md) — the constants and their measurements
+- [docs/errors.md](docs/errors.md) — what each failure reports
 
 ## References
 
@@ -114,15 +89,13 @@ behind each.
   [Content-Range](https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4)
   §14.4, [206](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.7)
   §15.3.7, [416](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5.17)
-  §15.5.17. Only single-part ranges are cached; a multi-range request is passed
-  straight through rather than partly honored.
+  §15.5.17
 - [WHATWG DOM: dependent signals](https://dom.spec.whatwg.org/#abortsignal-dependent-signals)
-  — why the deadline's `AbortSignal.any` leaves nothing behind on a long-lived
-  caller signal.
+  — why `AbortSignal.any` leaks nothing on a long-lived caller signal
 - [whatwg/fetch#951](https://github.com/whatwg/fetch/issues/951) — why `fetch`
-  has no timeout, and why this package adds none over a transfer.
+  has no timeout
 - [Per-endpoint rate limiting](https://copdips.com/2023/01/python-aiohttp-rate-limit.html)
-  — the semaphore-per-endpoint pattern `MAX_CONCURRENT` uses.
+  — the pattern `MAX_CONCURRENT` uses
 
 ## The layer above
 

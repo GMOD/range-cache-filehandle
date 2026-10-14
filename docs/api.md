@@ -1,8 +1,5 @@
 # API
 
-The package has eleven exports: two filehandles, three cache controls, and six
-constants.
-
 ## `new RemoteFileWithRangeCache(url, opts?)`
 
 A `RemoteFile` from
@@ -18,10 +15,8 @@ const file = new RemoteFileWithRangeCache(url, {
 })
 ```
 
-The URL is the cache key, so two instances on the same URL share chunks. A
-second handle on a file therefore reuses the chunks the first one fetched, for
-example for two tracks on one BAM, or for a parser that you handed a URL rather
-than a filehandle and that built its own.
+The URL is the cache key, so two instances on the same URL share chunks, for
+example two tracks on one BAM.
 
 Four methods behave differently from the base class.
 
@@ -51,9 +46,6 @@ request that has a string URL and a single-range `bytes=start-end` header with a
 synthetic 206. Any other request goes straight to `RemoteFile.fetch`: a
 `Request` object, an open-ended `bytes=100-`, a multi-range header, or no range
 at all.
-
-The cache therefore covers a caller that builds its own range requests, and
-leaves a caller that streams a whole file unaffected.
 
 On the cached path, `fetch` differs from `RemoteFile.fetch` in two ways. First,
 a status that the cache cannot read as the requested bytes **throws** rather
@@ -134,10 +126,8 @@ so past-EOF reads clamp, except a size of 0 from stats without `mtimeMs`. A
 recording that would make every read empty. An empty Blob still reads as empty,
 from its inner handle.
 
-`source` comes from the inner handle rather than from `key` on purpose, because
-of the `Blob` case. A caller invents a key where there is no name, while
-`source` is an address someone can look up, so a wrapper around a `Blob` reports
-`undefined`, and a slow-read log shows nothing rather than an invented id.
+`source` comes from the inner handle, not from `key`, so a wrapper around a
+`Blob` reports `undefined`.
 
 A local file may not need `CachedFilehandle` at all. The cache coalesces
 requests, and a `LocalFile` read is a positional read on an already-open
@@ -163,9 +153,7 @@ to re-derive.
 
 ## `clearCache()`
 
-Drop every cached chunk and every known size. The call is mostly for tests,
-which need each case to start empty, and for a consumer that has finished with
-everything it opened.
+Drop every cached chunk and every known size, mostly for tests.
 
 `clearCache` does not cancel work in flight, reject queued reads, or touch the
 concurrency pools. A read already running or queued for a slot gets its bytes,
@@ -178,9 +166,8 @@ after a clear. That follows from setting no time limit on a transfer;
 
 ## `clearCacheFor(key)`
 
-Drop one file's cached chunks and its known size, leaving every other file
-alone. A consumer closing one track needs this, where `clearCache()` would drop
-every file. The key is the one the file was opened with: the URL for a
+Drop one file's cached chunks and its known size, such as when a consumer closes
+one track. The key is the one the file was opened with: the URL for a
 `RemoteFileWithRangeCache`, and the second constructor argument for a
 `CachedFilehandle`.
 
@@ -193,9 +180,8 @@ completes, so a file cleared while a read was in flight stays cleared.
 
 `CHUNK_SIZE`, `MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT`,
 `MAX_SIZE_ENTRIES` and `RESPONSE_TIMEOUT_MS` are exported for reading, not
-setting. The cache is module-global, so a setting on one filehandle would apply
-to every other one in the process. [tuning.md](tuning.md) explains each constant
-and the measurement behind it.
+setting, because the cache is module-global. [tuning.md](tuning.md) explains
+each constant and the measurement behind it.
 
 `CHUNK_SIZE` is the granularity your reads are rounded to, so compare an index's
 chunk sizes against it to work out how much of a file a query costs.

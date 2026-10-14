@@ -5,8 +5,6 @@ error, so the error has to report what happened for the reader to decide what to
 do. The default errors, a bare `TypeError` or a status number with no context,
 turn "this BAM does not load" into a support thread.
 
-Three kinds of failure reach a caller.
-
 ## A status came back
 
 The message contains the status, the URL and the byte range, which is already
@@ -18,17 +16,13 @@ to do about it.
   then starts at byte 0, but callers slice it at the offsets they asked for, so
   every chunk past the first would be filled with data from the wrong position,
   with no error until something like `invalid bgzf header` shows up much later.
-  The cache accepts a 200 only when the request started at 0, where the body
-  covers the requested bytes, **and only for as much of it as the range asked
-  for**. The second condition limits memory, since reading a body allocates all
-  of it. Without a ceiling, a `stat()` of a 100 GB BAM on a server with no range
-  support would allocate 100 GB to learn one number, and every 256 KiB read
-  would allocate it again. The cache therefore reads the body under a ceiling
-  and fails the request the moment the body goes past it, so this message
-  appears instead of the process running out of memory. A file that really is
-  shorter than the request still passes, since the whole of it _is_ the range.
-  The ceiling is at least one 256 KiB chunk, because the size probe asks for a
-  single byte and every file is bigger than that.
+  The cache accepts a 200 only when the request started at 0, **and only for as
+  much of the body as the range asked for**. It reads the body under that
+  ceiling and fails the moment the body goes past it, so a `stat()` of a 100 GB
+  BAM on a server with no range support produces this message rather than a 100
+  GB allocation. A file shorter than the request still passes, since the whole
+  of it _is_ the range. The ceiling is at least one 256 KiB chunk, because the
+  size probe asks for a single byte.
 
   The cache measures the ceiling against the bytes it reads, not against
   `Content-Length`. That header counts the bytes on the wire, so with a
@@ -120,11 +114,10 @@ cause.
 
 The usual cause is a CORS misconfiguration that the network tab does not show,
 because the header is on the wire but the browser will not let the page read it.
-The message names the header to add, and also names the other cause. A server
-answering `bytes 0-0/*` has exposed the header correctly and declined to give a
-total, and a developer told only to expose the header could lose an afternoon
-exposing one the server already exposes. A caller that can degrade gracefully
-should wrap `stat()` in a `try`/`catch`.
+The message names the header to add, and also names the other cause, a server
+answering `bytes 0-0/*` that has exposed the header and declined to give a
+total. A caller that can degrade gracefully should wrap `stat()` in a
+`try`/`catch`.
 
 ## Checking a range response
 

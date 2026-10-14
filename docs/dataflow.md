@@ -12,9 +12,6 @@ chunks that no earlier read has fetched or is fetching. A query's many small,
 adjacent, semi-random reads therefore become a few large requests, and a second
 query over the same region makes none.
 
-The cache does this in four steps, in order: clamping, planning, fetching and
-assembling.
-
 ## Clamping
 
 `getCachedRange` starts by cutting the requested range down to the file size,
@@ -84,9 +81,7 @@ asking again.
 The read copies every chunk it uses into the result buffer at an offset computed
 from absolute file positions, so a short chunk cannot shift the position of
 later chunks. The read takes references to those chunks before its first
-`await`, so eviction cannot affect it. The global cache is shared and capped, so
-a concurrent read's `putCached` can drop a chunk this read still needs, but this
-read still holds the chunk through its own reference.
+`await`, so a concurrent read's eviction cannot affect it.
 
 A read waits for its chunks and its own signal at once. Cancellation is per
 reader even though the fetch is shared, so a reader that aborts rejects at once
@@ -112,8 +107,7 @@ peak memory with no reuse.
 ## Retries and progress
 
 The cache retries nothing, so a failed range read becomes an error and the
-reader decides what to do. [errors.md](errors.md) covers what the error reports
-and how the reader decides.
+reader decides what to do; see [errors.md](errors.md).
 
 The cache reports no per-byte progress, because range reads return a fully
 assembled in-memory `Response`. `generic-filehandle2`'s streaming `onProgress`

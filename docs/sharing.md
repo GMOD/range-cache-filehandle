@@ -41,9 +41,8 @@ Three cases need care, and each one was a bug before the code handled it.
 **A reader with no signal pins the run.** No combination of aborts should stop a
 request when one of its readers never asked to be cancellable, so the code marks
 the run `pinned` and stops consulting the count. One read without a signal
-therefore makes that request uncancellable for everyone sharing it. That is the
-correct reading of the API, and it is the reason to pass a signal even when you
-do not plan to abort.
+therefore makes that request uncancellable for everyone sharing it, so pass a
+signal even when you do not plan to abort.
 
 **A reader that has already aborted is not a waiter.** An `abort` listener never
 fires on a signal that aborted before the listener was added, so an
@@ -118,8 +117,7 @@ would take a slot out of the pool for good.
 
 ## What the URL key does and does not separate
 
-Two handles on one URL share chunks, so a second handle on a file reuses the
-chunks the first one fetched. They share requests too, and **the key is the URL
+Two handles on one URL share chunks and requests, and **the key is the URL
 alone**, so it does not separate handles that differ in how they fetch. If one
 handle has a `fetch` that signs its requests and another has a plain one, the
 handle that opens the run decides which `fetch` sends the request. The other
