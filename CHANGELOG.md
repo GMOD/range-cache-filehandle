@@ -1,3 +1,25 @@
+## [1.5.2](https://github.com/GMOD/range-cache-filehandle/compare/v1.5.1...v1.5.2) (2026-10-14)
+
+### Other Changes
+
+- Rewrite AI-writing tropes in README and docs ([e13162c](https://github.com/GMOD/range-cache-filehandle/commit/e13162cf71e45072e2873f35a670f0c6ee6b590b))
+- Restore claims changed by the tropes rewrite ([c462dcd](https://github.com/GMOD/range-cache-filehandle/commit/c462dcd669395f39ceabb06d637fd0e28a1c374a))
+- Fold short verdict sentences into their neighbours ([5ef833c](https://github.com/GMOD/range-cache-filehandle/commit/5ef833cb5b16e24304615192ab1cb7e477b089fb))
+- Fix doc errors found in the tropes audit ([15d006f](https://github.com/GMOD/range-cache-filehandle/commit/15d006fd9e40858282c7d3ef734779b6990f05e0))
+- Restore wording the tropes rewrite changed without a trope ([aa94365](https://github.com/GMOD/range-cache-filehandle/commit/aa94365a245e3d5c4bdc3b2aab7434f36b96e983))
+- Fix the Pool comment: the pool is per origin, not per key ([e327344](https://github.com/GMOD/range-cache-filehandle/commit/e327344e857276b5853fc55bdd0040520d6665a3))
+- Say per origin in the remaining pool comments ([e6b23b6](https://github.com/GMOD/range-cache-filehandle/commit/e6b23b6a46cd2ce9d343f51aac13992c7d0c24fa))
+- Trim wordiness in README and docs ([978072b](https://github.com/GMOD/range-cache-filehandle/commit/978072b28691ef3a188f22bffdf4f91853883618))
+- Keep a clear from being undone by the size a request in flight learns ([75bacde](https://github.com/GMOD/range-cache-filehandle/commit/75bacde31253fd1d683e2945af71f437d593f06b))
+- Fail a 416 whose own Content-Range puts the range inside the file ([1e533f4](https://github.com/GMOD/range-cache-filehandle/commit/1e533f4880d5eb03109c91154d6375685ce28548))
+- Recognize a network TypeError from another realm ([f5e06f3](https://github.com/GMOD/range-cache-filehandle/commit/f5e06f3cbd7f954eade57660b0512fa21a1d07a4))
+- Pass the chunk cache a signal instead of a RequestInit ([1066419](https://github.com/GMOD/range-cache-filehandle/commit/106641944b922d0a7442f5d6e5563a658ed9fc84))
+- Fold putSize into recordSize ([f1be7b1](https://github.com/GMOD/range-cache-filehandle/commit/f1be7b179a59cc9fd0303602ecbce1e4e3088c90))
+- Read an unchecked 206 body only as far as the request ([c0f0044](https://github.com/GMOD/range-cache-filehandle/commit/c0f0044d894ec3c09c470c406d7e837e6433a0e3))
+- Say what CachedFilehandle loses around a RemoteFile ([f88dc3a](https://github.com/GMOD/range-cache-filehandle/commit/f88dc3a2e31a5c1f52104b70057c196c87484f7e))
+- Compare large byte arrays with expectBytes in every test ([8b1d5b1](https://github.com/GMOD/range-cache-filehandle/commit/8b1d5b1d322b4b0221caef57a5c9626e227f32fb))
+- Flood the eviction test with small bodies ([b1b73e8](https://github.com/GMOD/range-cache-filehandle/commit/b1b73e8b643be53ec2d4c85b8a5f7d37cc12a562))
+
 ## [1.5.1](https://github.com/GMOD/range-cache-filehandle/compare/v1.5.0...v1.5.1) (2026-10-11)
 
 ### Documentation
