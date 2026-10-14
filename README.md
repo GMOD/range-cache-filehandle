@@ -105,7 +105,7 @@ behind each.
 - [docs/dataflow.md](docs/dataflow.md) — how a read flows, with the diagram
 - [docs/sharing.md](docs/sharing.md) — one request, several readers, and whose
   abort cancels it
-- [docs/tuning.md](docs/tuning.md) — the five constants, the measurements behind
+- [docs/tuning.md](docs/tuning.md) — the six constants, the measurements behind
   them, and what changes outside a browser
 - [docs/errors.md](docs/errors.md) — what each failure reports and why
 

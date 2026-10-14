@@ -65,8 +65,8 @@ no `Content-Range` or `Content-Length` header, so read the size with `stat()`.
 ### `stat()`
 
 Resolves to `{ size }`, taken from the size cache when an earlier range request
-has already read `Content-Range`, and otherwise from one zero-length range
-request made for the purpose.
+has already read `Content-Range`, and otherwise from one single-byte range
+request (`bytes=0-0`) made for the purpose.
 
 A server with no range support answers that probe, the smallest range there is,
 with the entire file. The probe reads up to one 256 KiB chunk of the body and
