@@ -103,14 +103,21 @@ export function withResponseDeadline(
  * a Chrome CORS-cache bug). By the time it gets here the class is gone and the
  * chain is the only thing that still says what it was. Depth-bounded because a
  * cause chain is not guaranteed acyclic.
+ *
+ * Matched by `name`, as `RemoteFile.fetch` matches it, because a custom `fetch`
+ * can throw a TypeError from another realm, which fails `instanceof`.
  */
 export function isNetworkRejection(e: unknown) {
   let cause = e
-  for (let depth = 0; depth < 5 && cause instanceof Error; depth++) {
-    if (cause instanceof TypeError) {
+  for (
+    let depth = 0;
+    depth < 5 && typeof cause === 'object' && cause !== null;
+    depth++
+  ) {
+    if ('name' in cause && cause.name === 'TypeError') {
       return true
     }
-    cause = cause.cause
+    cause = 'cause' in cause ? cause.cause : undefined
   }
   return false
 }

@@ -1,3 +1,5 @@
+import { runInNewContext } from 'node:vm'
+
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
@@ -101,6 +103,14 @@ describe('isNetworkRejection', () => {
       cause: new TypeError('Failed to fetch'),
     })
     expect(isNetworkRejection(wrapped)).toBe(true)
+  })
+
+  test('so is one from another realm', () => {
+    const foreign = runInNewContext('new TypeError("Failed to fetch")')
+    expect(foreign instanceof TypeError).toBe(false)
+    expect(
+      isNetworkRejection(new Error('fetching a.bin', { cause: foreign })),
+    ).toBe(true)
   })
 
   test('a plain error is not', () => {
