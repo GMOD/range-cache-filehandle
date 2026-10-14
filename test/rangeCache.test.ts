@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { expectBytes } from './expectBytes.ts'
 import { RemoteFileWithRangeCache, clearCache } from '../src/index.ts'
 
 const CHUNK = 256 * 1024
@@ -19,26 +20,6 @@ for (let i = 0; i < FILE_SIZE; i++) {
 
 function slice(start: number, end: number) {
   return fileData.slice(start, end + 1)
-}
-
-/**
- * `expect(bytes).toEqual(other)` walks a typed array element by element through
- * the structural-equality machinery, which on the 1.25 MB ranges below costs
- * seconds per assertion and timed the suite out. Compare the bytes directly and
- * hand the first difference to `expect` only when there is one, so a failure
- * still reads as a failure rather than as a wall of numbers.
- */
-function expectBytes(actual: Uint8Array, expected: Uint8Array) {
-  expect(actual.length).toBe(expected.length)
-  for (let i = 0; i < expected.length; i++) {
-    if (actual[i] !== expected[i]) {
-      expect({ offset: i, byte: actual[i] }).toEqual({
-        offset: i,
-        byte: expected[i],
-      })
-      return
-    }
-  }
 }
 
 // Mock fetch that serves range requests from fileData and tracks calls
@@ -321,8 +302,8 @@ describe('RemoteFileWithRangeCache', () => {
       const second = fetchRange(file, 100, 199)
       release()
 
-      expect(await first).toEqual(slice(0, 99))
-      expect(await second).toEqual(slice(100, 199))
+      expectBytes(await first, slice(0, 99))
+      expectBytes(await second, slice(100, 199))
       expect(calls).toHaveLength(1)
     })
 
@@ -335,8 +316,8 @@ describe('RemoteFileWithRangeCache', () => {
       const second = fetchRange(file, CHUNK, CHUNK * 3 - 1)
       release()
 
-      expect(await first).toEqual(slice(0, CHUNK * 2 - 1))
-      expect(await second).toEqual(slice(CHUNK, CHUNK * 3 - 1))
+      expectBytes(await first, slice(0, CHUNK * 2 - 1))
+      expectBytes(await second, slice(CHUNK, CHUNK * 3 - 1))
       expect(calls).toEqual([
         { start: 0, end: CHUNK * 2 - 1 },
         { start: CHUNK * 2, end: CHUNK * 3 - 1 },
@@ -373,7 +354,7 @@ describe('RemoteFileWithRangeCache', () => {
 
       // the failure left nothing cached and nothing marked in flight
       failing = false
-      expect(await fetchRange(file, 0, 99)).toEqual(slice(0, 99))
+      expectBytes(await fetchRange(file, 0, 99), slice(0, 99))
       expect(calls).toHaveLength(2)
     })
   })
@@ -465,7 +446,7 @@ describe('RemoteFileWithRangeCache', () => {
     const result = new Uint8Array(await res.arrayBuffer())
 
     // Only the bytes that actually exist are returned
-    expect(result).toEqual(smallFile.slice(overreadStart, smallFileSize))
+    expectBytes(result, smallFile.slice(overreadStart, smallFileSize))
 
     // Chunk 2 (starts at 2*CHUNK, past EOF) must NOT have been requested
     const chunk2Requests = calls.filter(c => c.start >= 2 * CHUNK)
@@ -613,7 +594,7 @@ describe('RemoteFileWithRangeCache', () => {
     const result = new Uint8Array(await res.arrayBuffer())
 
     // Returns only the bytes that exist
-    expect(result).toEqual(smallFile.slice(overreadStart, smallFileSize))
+    expectBytes(result, smallFile.slice(overreadStart, smallFileSize))
 
     // Both chunks were in one coalesced run — only one HTTP request
     expect(calls).toHaveLength(1)
@@ -834,7 +815,7 @@ describe('RemoteFileWithRangeCache', () => {
       const file = makeFile(rangeIgnoringFetch())
       // the body does start at byte 0, so slicing it at the requested offsets
       // is correct — no need to fail a server whose file fits in one chunk
-      expect(await fetchRange(file, 0, 99)).toEqual(slice(0, 99))
+      expectBytes(await fetchRange(file, 0, 99), slice(0, 99))
     })
 
     test('uses the 200 body length as the file size', async () => {
@@ -905,7 +886,7 @@ describe('RemoteFileWithRangeCache aborted-chunk sharing', () => {
     release()
 
     await expect(owner).rejects.toThrow(/abort/i)
-    expect(await joiner).toEqual(slice(100, 199))
+    expectBytes(await joiner, slice(100, 199))
     // One request, not two. Nothing was re-issued because nothing was
     // canceled; this asserted 2 back when a joiner had to re-fetch the 256 KiB
     // an aborting owner dropped on the floor.
@@ -1015,7 +996,7 @@ describe('RemoteFileWithRangeCache aborted-chunk sharing', () => {
 
     await expect(doomed).rejects.toThrow(/abort/i)
     release()
-    expect(await fresh).toEqual(slice(100, 199))
+    expectBytes(await fresh, slice(100, 199))
     expect(calls).toHaveLength(2)
   })
 
@@ -1127,7 +1108,7 @@ describe('RemoteFileWithRangeCache response deadline', () => {
     // an hour of downloading, 120x the deadline
     vi.advanceTimersByTime(RESPONSE_TIMEOUT * 120)
     releaseBody()
-    expect(await read).toEqual(slice(0, 99))
+    expectBytes(await read, slice(0, 99))
   })
 
   test("a caller's abort wins over a deadline still pending", async () => {
@@ -1394,7 +1375,7 @@ describe('RemoteFileWithRangeCache idle sweep', () => {
     vi.advanceTimersByTime(IDLE + SWEEP_INTERVAL)
     release!()
 
-    expect(await read).toEqual(slice(0, CHUNK + 99))
+    expectBytes(await read, slice(0, CHUNK + 99))
     // and the sweep really did take chunk 0 out from under that read, rather
     // than the assertion above passing because nothing was evicted
     expect(calls).toEqual([0, CHUNK])
@@ -1480,6 +1461,6 @@ describe('the response deadline covers whole-file reads too', () => {
 
     vi.advanceTimersByTime(RESPONSE_TIMEOUT * 120)
     releaseBody()
-    expect(await read).toEqual(slice(0, 99))
+    expectBytes(await read, slice(0, 99))
   })
 })

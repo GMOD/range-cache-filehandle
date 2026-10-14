@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'vitest'
 
+import { expectBytes } from './expectBytes.ts'
 import {
   CachedFilehandle,
   RemoteFileWithRangeCache,
@@ -79,8 +80,8 @@ describe('read() serves bytes without a Response round trip', () => {
     for (const [start, len] of cases) {
       const viaRead = await file.read(len, start)
       const viaFetch = await fetchRange(file, start, start + len - 1)
-      expect([...viaRead]).toEqual([...viaFetch])
-      expect([...viaRead]).toEqual([...slice(start, start + len - 1)])
+      expectBytes(viaRead, viaFetch)
+      expectBytes(viaRead, slice(start, start + len - 1))
     }
   })
 
