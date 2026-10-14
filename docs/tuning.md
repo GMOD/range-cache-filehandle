@@ -1,4 +1,4 @@
-# Tuning constants
+# The constants, and what measured them
 
 Six constants are exported for reading, not setting: `CHUNK_SIZE`,
 `MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT`,
@@ -20,7 +20,7 @@ We chose each value for one workload: a genome browser panning a track in a
 browser tab. [Where this runs](#where-this-runs) covers what changes for other
 workloads.
 
-## Why `MAX_CACHE_ENTRIES` is large
+## `MAX_CACHE_ENTRIES` looks oversized and is not
 
 `fetchRun` copies each chunk out of the run buffer rather than taking a view, so
 no chunk keeps a run buffer alive. The entry count therefore bounds memory at
@@ -56,7 +56,7 @@ minutes re-downloaded all 73.5 MB of a pan.
 
 We added the sweep because holding every chunk forever left 100 MB per worker
 resident after the track closed, after the tab hid, and after four minutes idle.
-The fifteen-minute timeout bounds how long that memory stays resident.
+Fifteen minutes bounds that without the cost of holding chunks forever.
 
 The sweep runs on an interval of a quarter of the timeout, so the lag between a
 chunk going idle and being dropped is ~1.25x the timeout rather than 2x. The
@@ -65,10 +65,10 @@ cache, so it does no work while the cache is empty. Chrome's intensive
 throttling of a hidden page does not affect the sweep where it matters, because
 Chrome does not throttle workers, and the workers hold the bytes.
 
-`sweepIdleCache()` is exported so a consumer can free memory on its own
-schedule, such as when a tab goes hidden. The interval is still needed for an
-idle consumer, which calls nothing, so a check that ran only on the next cache
-access would never run for the reader who walked away.
+`sweepIdleCache()` is exported so a consumer can reclaim on its own schedule,
+such as when a tab goes hidden. The interval is still needed for an idle
+consumer, which calls nothing, so a check that ran only on the next cache access
+would never run for the reader who walked away.
 
 `clearCache()` drops every chunk and every known size. It leaves reads in flight
 or queued to finish under the concurrency cap, and is mostly for tests, which
@@ -152,7 +152,7 @@ again a minute later and 256 MB of a device's memory is a reasonable ask.
 Consider two other deployment patterns before taking the defaults.
 
 **A long-lived server process** shares one cache across every request it serves,
-keyed by URL. Sharing helps when many requests read the same few files, and only
+keyed by URL. Sharing helps when many requests hit the same few files, and only
 costs memory when each request reads a file no other request will touch, because
 the chunks stay for fifteen minutes waiting for a re-read that never comes. If
 your traffic is the second kind, call `clearCache()` when a job finishes, or

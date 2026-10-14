@@ -51,8 +51,8 @@ a single synchronous pass with no `await` in it, so two reads arriving in the
 same tick cannot both open a request for the same chunk.
 
 - **Cached.** Serve the bytes, and move the entry to the end of the map's
-  iteration order. Eviction takes from the front, so the move makes the cache
-  least-recently-used rather than first-in-first-out by first fetch.
+  iteration order. Eviction takes from the front, so the move makes the cache an
+  LRU rather than a FIFO by first fetch.
 - **In flight.** Await the promise another read already has for it, and register
   this reader's interest in the run that promise belongs to.
   [sharing.md](sharing.md) describes that mechanism.

@@ -7,9 +7,8 @@ A `GenericFilehandle` that caches byte ranges in chunks and coalesces adjacent
 reads into one request.
 
 An indexed genomics parser makes many small, adjacent, semi-random reads, most
-near ones it just made. This package sits under the parser, merges those reads
-into a few large requests, and serves the next query's overlapping reads from
-memory.
+near ones it just made. This layer sits under the parser, turns those reads into
+a few large requests, and serves the next query's overlapping reads from memory.
 
 ```sh
 npm install @gmod/range-cache-filehandle
@@ -29,9 +28,9 @@ const cram = new CramFile({
 })
 ```
 
-`CachedFilehandle` wraps a local file or `Blob` instead. Its second argument is
-the key for this file's chunks in the shared cache, so it must identify the
-underlying bytes:
+`CachedFilehandle` wraps a local file or `Blob` instead. Its second argument
+keys this file's chunks in the shared cache, so it must identify the underlying
+bytes:
 
 ```js
 import { CachedFilehandle } from '@gmod/range-cache-filehandle'
@@ -51,11 +50,10 @@ that read sent, as [CONTRIBUTING.md](CONTRIBUTING.md#docs) describes.
   grouped into contiguous runs, one request each.
 - Joins a chunk another read has in flight rather than requesting it again.
 - Reference-counts each run's readers, so a shared request is cancelled only
-  once all of them abort. A reader that passes no signal keeps the request
-  running for everyone.
+  once all of them abort. A reader passing no signal pins it for everyone.
 - Holds 1000 chunks (256 MB) per worker and sweeps chunks idle for 15 minutes.
   `clearCache()` drops everything, `clearCacheFor(key)` drops one file, and
-  `sweepIdleCache()` sweeps early.
+  `sweepIdleCache()` reclaims early.
 - Runs 20 requests at a time **per origin**.
 - Clamps reads past EOF once a size is known, from `Content-Range`, a 416, or
   `stat()`.
@@ -83,8 +81,8 @@ The concurrency cap is per origin:
 - It is per origin and not per URL, because a presigned URL rotates its
   signature on every read.
 
-[docs/dataflow.md](docs/dataflow.md) has the diagram and follows one read
-through each of these steps.
+[docs/dataflow.md](docs/dataflow.md) has the diagram and walks one read through
+all of it.
 
 ## Tuning
 
@@ -105,8 +103,8 @@ behind each.
 - [docs/dataflow.md](docs/dataflow.md) — how a read flows, with the diagram
 - [docs/sharing.md](docs/sharing.md) — one request, several readers, and whose
   abort cancels it
-- [docs/tuning.md](docs/tuning.md) — the six constants, the measurements behind
-  them, and what changes outside a browser
+- [docs/tuning.md](docs/tuning.md) — the six constants, what measured them, and
+  what changes outside a browser
 - [docs/errors.md](docs/errors.md) — what each failure reports and why
 
 ## References

@@ -116,7 +116,7 @@ rather than leaving a resolver that does nothing, because `runNext` claims a
 slot _before_ it resumes the waiter it shifts off the queue, so a no-op waiter
 would take a slot out of the pool for good.
 
-## Handles that share a URL
+## What the URL key does and does not separate
 
 Two handles on one URL share chunks, so a second handle on a file reuses the
 chunks the first one fetched. They share requests too, and **the key is the URL

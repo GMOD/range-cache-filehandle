@@ -2,9 +2,9 @@
 
 An indexed genomics parser reads a remote file as many small, adjacent,
 semi-random ranges. A browser runs about six requests per origin over HTTP/1.1,
-so the request count limits the wall-clock time long before the parser's CPU
-work does. Every optimization here reduces that count or the bytes behind it.
-[dataflow.md](dataflow.md) follows one read through the steps,
+so the request count sets the wall-clock time long before the parser's CPU work
+does. Every optimization here cuts that count or the bytes behind it.
+[dataflow.md](dataflow.md) walks one read through the steps,
 [sharing.md](sharing.md) covers shared requests, and [tuning.md](tuning.md)
 covers the constants.
 
@@ -52,12 +52,12 @@ chunk cache. The default `RemoteFile.fetchBytes` builds a range header, calls
 `fetch` and unwraps a `Response`, and on a warm read that round trip took 69-77%
 of the time (6.15 ms against 1.90 ms at 16 MB).
 
-## Each chunk is a copy
+## Chunks own their bytes
 
 The layer copies each chunk out of a run's response with `slice` rather than
 `subarray`. A view would keep the whole run buffer alive while any one chunk
-stayed cached, so evicting a chunk would free nothing. Because each chunk is a
-copy, the 1000-entry cap bounds memory at 256 MB per worker.
+stayed cached, so evicting a chunk would free nothing. The copy makes the
+1000-entry cap a real 256 MB bound per worker.
 
 ## The cache outlives the parsed caches above it
 
@@ -68,7 +68,7 @@ parsed cache expires, this cache is the only thing that keeps a re-read from
 becoming a re-download. With a three-minute timeout, a reader who stepped away
 for four minutes re-downloaded all 73.5 MB of a pan.
 [tuning.md](tuning.md#cache_idle_timeout_ms-is-longer-than-the-caches-above-it-deliberately)
-has the details.
+has the rest.
 
 ## Reads stop at the end of the file
 

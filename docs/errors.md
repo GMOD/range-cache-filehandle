@@ -43,7 +43,7 @@ to do about it.
   may have expired, or a bucket policy may not grant read to the page origin.
 - **404** — check the URL, and that the index sits where the reader expects it
   alongside the data file.
-- **429 or 5xx** — the server is failing or refusing requests for now, and since
+- **429 or 5xx** — the server is failing or declining just now, and since
   nothing retries automatically, the caller decides whether to try again.
 - **416** — not an error at all here. Range Not Satisfiable means the range
   starts past the end, and RFC 9110 has the server report the real length as
@@ -55,13 +55,13 @@ to do about it.
 ## No status came back
 
 A CORS denial, a mixed-content block, a DNS failure, a refused connection and an
-offline browser all reject with the same bare `TypeError` (`Failed to fetch` in
+offline browser all reject with the same bare `TypeError` — `Failed to fetch` in
 Chrome, `Load failed` in Safari,
-`NetworkError when attempting to fetch resource` in Firefox), with no status, no
+`NetworkError when attempting to fetch resource` in Firefox — with no status, no
 headers and no URL. The browser hides the cause deliberately, because an error
 that named the cause would itself be a cross-origin read.
 
-The hint checks for the two causes a page can detect, and then names the cause
+The hint names the two that are checkable from inside the page, and then the one
 that is left:
 
 1. `navigator.onLine === false` — the browser reports no network connection. The
@@ -91,11 +91,10 @@ check the message would explain a cancelled pan as a CORS misconfiguration.
 
 ## No answer came back
 
-A connection that stays open with no response for 30 seconds fails with a
-message that says so. The message also says that the limit does not apply to a
-transfer already under way, so the request stalled rather than ran slowly.
-[tuning.md](tuning.md) explains why the deadline covers the response rather than
-the transfer.
+A connection that is open and silent for 30 seconds fails with a message saying
+so, and saying that a transfer already under way is not subject to the limit, so
+this is a stalled request rather than a slow one. [tuning.md](tuning.md)
+explains why the deadline covers the response rather than the transfer.
 
 On the range path the deadline belongs to the shared request rather than to each
 reader, because `fetchRun` coalesces every reader of those chunks onto one
@@ -106,10 +105,10 @@ has one reader, so it has its own deadline.
 The message names the range on the range path and the file on the whole-file
 one, which is also how you can tell which of the two you are looking at.
 
-The seconds in the message count the whole wait. A request the browser held in
-its per-host queue behind six streaming bodies waits longer than 30 seconds
-before it is reported; [tuning.md](tuning.md#requests-the-browser-has-queued)
-has the rule.
+The seconds in the message are the whole wait. A request the browser held in its
+per-host queue behind six streaming bodies waits longer than 30 seconds before
+it is reported; [tuning.md](tuning.md#requests-the-browser-has-queued) has the
+rule.
 
 ## The one that succeeds and still fails
 
@@ -124,7 +123,7 @@ because the header is on the wire but the browser will not let the page read it.
 The message names the header to add, and also names the other cause. A server
 answering `bytes 0-0/*` has exposed the header correctly and declined to give a
 total, and a developer told only to expose the header could lose an afternoon
-exposing one the server already exposes. A caller that can work without a size
+exposing one the server already exposes. A caller that can degrade gracefully
 should wrap `stat()` in a `try`/`catch`.
 
 ## Checking a range response
@@ -144,12 +143,12 @@ at the ceiling rather than allocating the whole body and rejecting it
 afterwards.
 
 **With a `Content-Encoding`, the cache cannot check the length.** The bytes on
-the wire are then not the bytes of the range, so their count says nothing about
-the range, and the cache skips the two length checks. The header checks still
-run, so the cache rejects a response that contradicts itself or describes some
-other range, however it is encoded. A proxy that truncates an encoded body,
-though, passes every remaining check, and the cache stores the truncated body as
-a file that ends early.
+the wire are then not the bytes of the range, so their count means nothing, and
+the cache skips the two length checks. The header checks still run, so the cache
+rejects a response that contradicts itself or describes some other range,
+however it is encoded. A proxy that truncates an encoded body, though, passes
+every remaining check, and the cache stores the truncated body as a file that
+ends early.
 
 We leave this unfixed, because a server that compresses a byte range is already
 unusual, and the reader has no way to distinguish the honest form (the range's

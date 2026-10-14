@@ -82,7 +82,7 @@ because cross-origin it can be a compressed count, and CORS hides the
 `Content-Range` was unreadable, a CORS misconfiguration that the network tab
 does not show. [errors.md](errors.md#the-one-that-succeeds-and-still-fails) has
 the reasoning and the header to add. Wrap the call in a `try`/`catch` if your
-caller can work without a size.
+caller can degrade.
 
 ### `protected recordSize(size)`
 
@@ -101,9 +101,9 @@ class GoogleDriveFile extends RemoteFileWithRangeCache {
 
 Without `recordSize`, the size cache stays empty for that URL however many times
 `stat()` is called, so the clamp in [dataflow.md](dataflow.md#clamping) never
-applies. `@gmod/bam` and `@gmod/tabix` size their last read to cover the whole
-final BGZF block, so that read always runs past EOF. Without the clamp, the
-server answers it with a 416 instead of the last block.
+applies. `@gmod/bam` and `@gmod/tabix` compute their last read to cover the
+whole final BGZF block, so that read always runs past EOF. Without the clamp,
+the server answers it with a 416 instead of the last block.
 
 `recordSize` ignores a non-finite size. A metadata endpoint may set `size` only
 for real files and leave it out for folders, shortcuts and native editor
@@ -153,8 +153,8 @@ chunks it will assemble, and a later read that wants a dropped chunk re-fetches
 it.
 
 The library already calls `sweepIdleCache()` on an interval. Call it yourself to
-free memory sooner after an event the library cannot see, such as a tab going
-hidden, a track closing, or a request finishing on a server.
+reclaim earlier on an event the library cannot see, such as a tab going hidden,
+a track closing, or a request finishing on a server.
 
 `sweepIdleCache()` is deliberately narrower than `clearCache`. It leaves
 in-flight fetches and queued reads alone, since those are by definition active,
