@@ -1,9 +1,9 @@
 # Errors
 
-The cache retries nothing. A failed range read becomes an error and the reader
-decides what to do, so the error has to report what happened. The default
-errors, a bare `TypeError` or a status number with no context, turn "this BAM
-does not load" into a support thread.
+The cache retries nothing and hands a failed range read to the reader as an
+error, so the error has to report what happened for the reader to decide what to
+do. The default errors, a bare `TypeError` or a status number with no context,
+turn "this BAM does not load" into a support thread.
 
 Three kinds of failure reach a caller.
 
@@ -20,8 +20,8 @@ to do about it.
   with no error until something like `invalid bgzf header` shows up much later.
   The cache accepts a 200 only when the request started at 0, where the body
   covers the requested bytes, **and only for as much of it as the range asked
-  for**. The second condition limits memory. Reading a body allocates all of it,
-  so without a ceiling, a `stat()` of a 100 GB BAM on a server with no range
+  for**. The second condition limits memory, since reading a body allocates all
+  of it. Without a ceiling, a `stat()` of a 100 GB BAM on a server with no range
   support would allocate 100 GB to learn one number, and every 256 KiB read
   would allocate it again. The cache therefore reads the body under a ceiling
   and fails the request the moment the body goes past it, so this message
@@ -47,10 +47,10 @@ to do about it.
   nothing retries automatically, the caller decides whether to try again.
 - **416** — not an error at all here. Range Not Satisfiable means the range
   starts past the end, and RFC 9110 has the server report the real length as
-  `bytes */12345`. The cache keeps that size, the only useful content of the
-  response. The size lets the cache clamp every later over-read instead of
-  having it refused again, and it is the only way `stat()` can answer for an
-  empty file, every range of which is unsatisfiable. The read returns empty.
+  `bytes */12345`. The read returns empty, and the cache keeps that size, the
+  only useful content of the response. The size lets the cache clamp every later
+  over-read instead of having it refused again, and it is the only way `stat()`
+  can answer for an empty file, every range of which is unsatisfiable.
 
 ## No status came back
 
@@ -71,7 +71,7 @@ that is left:
    skipped the checks below it.
 2. An `http:` URL on an `https:` page — the browser blocked the request before
    sending it, and the file has to be served over https too.
-3. Otherwise, most often CORS. The server must send
+3. Anything else — most often CORS, where the server must send
    `Access-Control-Allow-Origin`, and
    `Access-Control-Expose-Headers: Content-Range` as well or the size of the
    file cannot be read either. A host that is down, a DNS failure and a blocked
@@ -137,10 +137,11 @@ than the range it claims. Code downstream cannot tell such a truncated response
 from the end of the file, since a short chunk _is_ how this package represents
 EOF.
 
-The length check also caps memory. The cache reads a body only as far as the
-range the header declared. If a proxy answers a 256 KiB request with an honest
-`Content-Range` and then streams the whole file, the cache stops reading at the
-ceiling rather than allocating the whole body and rejecting it afterwards.
+The length check also caps memory, because the cache reads a body only as far as
+the range the header declared. If a proxy answers a 256 KiB request with an
+honest `Content-Range` and then streams the whole file, the cache stops reading
+at the ceiling rather than allocating the whole body and rejecting it
+afterwards.
 
 **With a `Content-Encoding`, the cache cannot check the length.** The bytes on
 the wire are then not the bytes of the range, so their count says nothing about

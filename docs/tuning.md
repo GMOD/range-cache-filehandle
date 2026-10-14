@@ -42,11 +42,10 @@ parsed budget.
 
 ## `CACHE_IDLE_TIMEOUT_MS` is longer than the caches above it, deliberately
 
-`@gmod/bam`, `@gmod/cram` and `@gmod/tabix` all take a `cacheIdleTimeoutMs` and
-all default to three minutes
+This layer keeps chunks for fifteen minutes, while `@gmod/bam`, `@gmod/cram` and
+`@gmod/tabix` all take a `cacheIdleTimeoutMs` that defaults to three minutes
 ([bam-js/docs/caching.md](https://github.com/GMOD/bam-js/blob/main/docs/caching.md),
 [cram-js/docs/memory.md](https://github.com/GMOD/cram-js/blob/main/docs/memory.md)).
-This layer keeps chunks for fifteen.
 
 Raw compressed bytes take roughly an order of magnitude less memory per unit of
 genomic coverage than the parsed features above them, and once those caches
@@ -117,14 +116,14 @@ the deadline would count the wait, and on a slow link a request that was never
 sent would fail as though the server had sent nothing.
 
 The deadline therefore re-arms on evidence that the origin is answering. Each
-request counts its body from the moment its headers arrive until the body ends,
-is cancelled or fails, both in its own context and as a shared Web Lock named
-for the origin, which `navigator.locks.query()` shows to every worker and tab.
-When a deadline fires and `BROWSER_CONNECTIONS_PER_HOST` (six) or more bodies
-are in progress on its origin, it re-arms for another 30 seconds instead of
-failing, at most `MAX_DEADLINE_REARMS` (ten) times, so six bodies stalled
-forever still end in an error after five and a half minutes. A whole-file
-`readFile` counts its body the same way. Only http(s) origins take part.
+request to an http(s) origin counts its body from the moment its headers arrive
+until the body ends, is cancelled or fails, both in its own context and as a
+shared Web Lock named for the origin, which `navigator.locks.query()` shows to
+every worker and tab. When a deadline fires and `BROWSER_CONNECTIONS_PER_HOST`
+(six) or more bodies are in progress on its origin, it re-arms for another 30
+seconds instead of failing, at most `MAX_DEADLINE_REARMS` (ten) times, so six
+bodies stalled forever still end in an error after five and a half minutes. A
+whole-file `readFile` counts its body the same way.
 
 Three limits remain:
 

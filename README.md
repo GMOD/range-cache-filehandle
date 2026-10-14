@@ -45,7 +45,7 @@ const file = new CachedFilehandle(new LocalFile(path), `file://${path}`)
 <img src="docs/img/chunks.svg" alt="A read spanning five 256 KiB chunks: one is cached, one is already being fetched by another read, and the three that are missing become two range requests" width="660">
 
 The picture comes from running the cache, and its range headers are the ones
-that read sent. [CONTRIBUTING.md](CONTRIBUTING.md#docs) covers how.
+that read sent, as [CONTRIBUTING.md](CONTRIBUTING.md#docs) describes.
 
 - Serves reads from a 256 KiB chunk grid. The chunks a read is missing are
   grouped into contiguous runs, one request each.
@@ -78,9 +78,8 @@ Timeouts and retries:
 
 The concurrency cap is per origin:
 
-- One unresponsive server cannot starve the others. This is the
-  [per-endpoint semaphore](https://copdips.com/2023/01/python-aiohttp-rate-limit.html)
-  pattern.
+- One unresponsive server cannot starve the others, as with any
+  [per-endpoint semaphore](https://copdips.com/2023/01/python-aiohttp-rate-limit.html).
 - It is per origin and not per URL, because a presigned URL rotates its
   signature on every read.
 

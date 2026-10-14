@@ -114,7 +114,7 @@ empty.
 ## `new CachedFilehandle(inner, key)`
 
 `CachedFilehandle` puts the chunk cache in front of any `GenericFilehandle`,
-such as a `LocalFile`, a `BlobFile`, or your own implementation. The cache
+such as a `LocalFile`, a `BlobFile`, or your own implementation, since the cache
 contains no HTTP-specific code.
 
 ```js

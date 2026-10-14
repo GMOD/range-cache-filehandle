@@ -26,12 +26,12 @@ whole, which by construction runs past EOF on the last block of every file.
 Unclamped, that tail asks for chunks that start past the end of the file, and
 the server answers 416.
 
-The size comes from one of three places: a `Content-Range` header on a 206, a
-`Content-Range` on a 416, or a `stat()`. Whichever comes first fills the size
-cache. The size cache is keyed like the chunk cache rather than held on the
-filehandle, because otherwise a new instance whose reads hit chunks an earlier
-instance fetched would have no size to clamp against. `CachedFilehandle.stat()`
-records the size it gets from the local file or Blob for the same reason.
+The size cache takes the size from whichever of three sources answers first: a
+`Content-Range` header on a 206, a `Content-Range` on a 416, or a `stat()`. The
+size cache is keyed like the chunk cache rather than held on the filehandle,
+because otherwise a new instance whose reads hit chunks an earlier instance
+fetched would have no size to clamp against. `CachedFilehandle.stat()` records
+the size it gets from the local file or Blob for the same reason.
 
 A read that begins at or past the end has nothing left after the cut, and
 returns empty without planning anything. The code checks for this case
@@ -111,12 +111,12 @@ peak memory with no reuse.
 
 ## Retries and progress
 
-The cache retries nothing. A failed range read becomes an error, and the reader
-decides what to do; [errors.md](errors.md) covers what the error reports and how
-the reader decides.
+The cache retries nothing, so a failed range read becomes an error and the
+reader decides what to do. [errors.md](errors.md) covers what the error reports
+and how the reader decides.
 
-The cache reports no per-byte progress. Range reads return a fully assembled
-in-memory `Response`, so `generic-filehandle2`'s streaming `onProgress` receives
-the whole buffer at once and reports 0→100 instantly. The indexed parsers report
-their own progress at block granularity from their index metadata, which is the
-meaningful unit and also counts cache hits.
+The cache reports no per-byte progress, because range reads return a fully
+assembled in-memory `Response`. `generic-filehandle2`'s streaming `onProgress`
+therefore receives the whole buffer at once and reports 0→100 instantly. The
+indexed parsers report their own progress at block granularity from their index
+metadata, which is the meaningful unit and also counts cache hits.
