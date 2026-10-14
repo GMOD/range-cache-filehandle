@@ -548,9 +548,13 @@ export async function probeSize(
 // ---------------------------------------------------------------------------
 
 /**
- * The one door into the size cache, and so where finiteness is checked.
+ * Record a size a filehandle learned some way other than a range request — a
+ * `stat` the underlying source answers directly, or one a subclass gets from a
+ * metadata endpoint. Authoritative, so unlike {@link recordSizeIfUnknown} it
+ * overwrites what is already there.
  *
- * A non-finite size does not fail, it *poisons*: `Math.min(start + length, NaN)`
+ * The one door into the size cache, and so where finiteness is checked. A
+ * non-finite size does not fail, it *poisons*: `Math.min(start + length, NaN)`
  * is NaN, so `getCachedRange`'s chunk loop never runs and every later read of
  * that file returns empty with nothing said. A metadata endpoint that populates
  * `size` only for files that have one — not for folders, shortcuts or native
@@ -558,22 +562,12 @@ export async function probeSize(
  * hypothetical, so the guard belongs here rather than at whichever caller was
  * thought of first.
  */
-function putSize(key: string, size: number) {
+export function recordSize(key: string, size: number) {
   if (Number.isFinite(size)) {
     sizeCache.delete(key)
     evictOldest(sizeCache, MAX_SIZE_ENTRIES)
     sizeCache.set(key, size)
   }
-}
-
-/**
- * Record a size a filehandle learned some way other than a range request — a
- * `stat` the underlying source answers directly, or one a subclass gets from a
- * metadata endpoint. Authoritative, so unlike the Content-Range observation
- * below it overwrites what is already there.
- */
-export function recordSize(key: string, size: number) {
-  putSize(key, size)
 }
 
 export function hasSize(key: string) {
@@ -582,7 +576,7 @@ export function hasSize(key: string) {
 
 /**
  * Re-inserts on the way out, so the map is ordered by *use* rather than by first
- * write. Without that, `putSize` evicts the entry a session reads all day — it
+ * write. Without that, `recordSize` evicts the entry a session reads all day — it
  * was written first, so it goes first — while the five thousand rotating
  * presigned URLs that pushed it out are all newer and all stay. Losing it loses
  * the EOF clamp `getCachedRange` depends on.
@@ -603,7 +597,7 @@ export function getSize(key: string) {
  */
 function recordSizeIfUnknown(key: string, size: number | undefined) {
   if (size !== undefined && !sizeCache.has(key)) {
-    putSize(key, size)
+    recordSize(key, size)
   }
 }
 
