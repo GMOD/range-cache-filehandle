@@ -109,7 +109,7 @@ let sizeCache = new Map<string, number>()
  * That is why the owning run is recorded here; see {@link joinChunk}.
  */
 let inFlight = new Map<string, InFlightChunk>()
-/** one {@link Pool} per key, created on demand and dropped when it empties */
+/** one {@link Pool} per origin (per key for a non-http URL), created on demand and dropped when it empties */
 const pools = new Map<string, Pool>()
 /**
  * Lookups that must happen once per key however many callers ask at once —
@@ -349,7 +349,7 @@ function isChunkOf(chunkKey: string, key: string) {
 }
 
 // ---------------------------------------------------------------------------
-// concurrency, per key
+// concurrency, per origin
 // ---------------------------------------------------------------------------
 
 /**
