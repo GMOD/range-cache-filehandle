@@ -99,32 +99,59 @@ export function discardBody(res: Response) {
  * within it, and only asking again separates that from one that goes on.
  */
 export async function readBodyAtMost(res: Response, limit: number) {
-  const reader = res.body?.getReader()
+  const { parts, total } = await readUpTo(res, limit)
+  return total > limit ? undefined : concat(parts, total)
+}
+
+/**
+ * The first `limit` bytes of a response, with the rest of the body cancelled
+ * unread: for a body whose bytes past `limit` nothing would ever look at.
+ */
+export async function readBodyPrefix(res: Response, limit: number) {
+  const { parts, total } = await readUpTo(res, limit)
+  return concat(parts, Math.min(total, limit))
+}
+
+/**
+ * Read until the body ends or more than `limit` bytes have arrived. A
+ * Response-like from a custom `fetch` may have no `body` stream, and is read
+ * whole.
+ */
+async function readUpTo(res: Response, limit: number) {
+  if (!res.body) {
+    const bytes = new Uint8Array(await res.arrayBuffer())
+    return { parts: [bytes], total: bytes.byteLength }
+  }
+  const reader = res.body.getReader()
   const parts: Uint8Array[] = []
   let total = 0
-  if (reader) {
-    let ended = false
-    while (!ended && total <= limit) {
-      const step = await reader.read()
-      if (step.done) {
-        ended = true
-      } else {
-        parts.push(step.value)
-        total += step.value.byteLength
-      }
-    }
-    if (!ended) {
-      reader.cancel().catch(() => undefined)
+  let ended = false
+  while (!ended && total <= limit) {
+    const step = await reader.read()
+    if (step.done) {
+      ended = true
+    } else {
+      parts.push(step.value)
+      total += step.value.byteLength
     }
   }
-  if (total > limit) {
-    return undefined
+  if (!ended) {
+    reader.cancel().catch(() => undefined)
   }
-  const bytes = new Uint8Array(total)
+  return { parts, total }
+}
+
+/** the first `length` bytes of `parts`, joined */
+function concat(parts: Uint8Array[], length: number) {
+  const bytes = new Uint8Array(length)
   let at = 0
   for (const part of parts) {
-    bytes.set(part, at)
-    at += part.byteLength
+    if (at >= length) {
+      break
+    }
+    const take = part.subarray(0, length - at)
+    bytes.set(take, at)
+    at += take.byteLength
   }
   return bytes
 }

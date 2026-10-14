@@ -222,6 +222,63 @@ describe('a response that is not the range it claims to be', () => {
     expect(state.pulled).toBeLessThanOrEqual(CHUNK + 2 * PIECE)
   })
 
+  test.each([
+    ['no readable Content-Range', {}],
+    [
+      'a Content-Encoding',
+      { 'content-range': `bytes 0-${CHUNK - 1}/${FILE_SIZE}` },
+      'gzip',
+    ],
+  ])(
+    'a body with %s is read only as far as the request',
+    async (_label, headers, encoding?: string) => {
+      // nothing to check the body against, so it is served, but nothing past
+      // the request is ever used: a proxy streaming the whole file costs the
+      // request, not the file
+      const PIECE = 32 * 1024
+      const state = { pulled: 0 }
+      const streaming = async () => {
+        const body = new ReadableStream(
+          {
+            pull(controller) {
+              controller.enqueue(
+                fileData.slice(state.pulled, state.pulled + PIECE),
+              )
+              state.pulled += PIECE
+              if (state.pulled >= FILE_SIZE) {
+                controller.close()
+              }
+            },
+          },
+          new CountQueuingStrategy({ highWaterMark: 0 }),
+        )
+        const response = new Response(body, { status: 206, headers })
+        if (encoding) {
+          // a real Response decodes a gzip body, so set the header afterwards
+          response.headers.set('content-encoding', encoding)
+        }
+        return response
+      }
+      const file = makeFile(nextUrl(), streaming)
+      const bytes = await file.read(100, 0)
+      expect([...bytes]).toEqual([...fileData.slice(0, 100)])
+      expect(state.pulled).toBeLessThanOrEqual(CHUNK + PIECE)
+    },
+  )
+
+  test('a Response-like with no body stream is read through arrayBuffer', async () => {
+    // a custom fetch may hand back an object with no `body`; read as a stream,
+    // a 200 of it came back empty and fixed the file's size at 0
+    const responseLike = async () => ({
+      status: 200,
+      ok: true,
+      headers: new Headers(),
+      arrayBuffer: async () => fileData.slice(0, 100).buffer,
+    })
+    const file = makeFile(nextUrl(), responseLike)
+    expect(await file.stat()).toEqual({ size: 100 })
+  })
+
   test('a short body is accepted where the file really does end there', async () => {
     const url = nextUrl()
     const file = makeFile(url, goodServer())

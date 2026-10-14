@@ -135,7 +135,9 @@ The length check also caps memory, because the cache reads a body only as far as
 the range the header declared. If a proxy answers a 256 KiB request with an
 honest `Content-Range` and then streams the whole file, the cache stops reading
 at the ceiling rather than allocating the whole body and rejecting it
-afterwards.
+afterwards. The cache reads a body it cannot check (no readable `Content-Range`,
+or a `Content-Encoding`) up to the length of the request, the last byte it ever
+uses.
 
 **With a `Content-Encoding`, the cache cannot check the length.** The bytes on
 the wire are then not the bytes of the range, so their count means nothing, and

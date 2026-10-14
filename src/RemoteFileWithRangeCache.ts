@@ -15,6 +15,7 @@ import {
   parseByteRange,
   parseContentRange,
   readBodyAtMost,
+  readBodyPrefix,
 } from './util.ts'
 
 import type { FetchedRange } from './chunkCache.ts'
@@ -130,7 +131,7 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       return { bytes, total: bytes.byteLength }
     } else {
       const range = parseContentRange(res.headers.get('content-range'))
-      const bytes = await readDeclaredRange(res, url, range)
+      const bytes = await readDeclaredRange(res, url, end - start + 1, range)
       // A response this rejects has still told us a `total`, and the size cache
       // never overwrites one, so returning it lets a proxy with a wrong
       // Content-Range fix the size of the file at whatever it claimed: every
@@ -393,13 +394,16 @@ async function readWholeFile(
  *
  * Only where the header says how long the range is and the body is those bytes
  * — the same two conditions the length check downstream is already gated on. A
- * `Content-Range` hidden by CORS leaves nothing to bound against, and under a
- * `Content-Encoding` the bytes on the wire are not the bytes of the range, so
- * neither is checkable and both read as before.
+ * `Content-Range` hidden by CORS leaves nothing to check against, and under a
+ * `Content-Encoding` the bytes on the wire are not the bytes of the range. Both
+ * stop reading after the `requested` bytes, because nothing past them is ever
+ * used: the run is cut into chunks from its start, so a proxy streaming the
+ * whole file costs the request, not the file.
  */
 async function readDeclaredRange(
   res: Response,
   url: string,
+  requested: number,
   range: ReturnType<typeof parseContentRange>,
 ) {
   if (
@@ -408,7 +412,7 @@ async function readDeclaredRange(
     range.end < range.start ||
     res.headers.get('content-encoding')
   ) {
-    return new Uint8Array(await res.arrayBuffer())
+    return readBodyPrefix(res, requested)
   }
   const declared = range.end - range.start + 1
   const buffer = await readBodyAtMost(res, declared)
