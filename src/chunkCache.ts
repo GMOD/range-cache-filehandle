@@ -71,9 +71,9 @@ interface CacheEntry {
 }
 
 /**
- * Requests in flight against one key, and the reads waiting for a turn.
- * See {@link MAX_CONCURRENT} for why the pool is per key rather than one pool
- * for the process.
+ * Requests in flight against one origin (one key, for a non-http URL), and the
+ * reads waiting for a turn. See {@link MAX_CONCURRENT} for why the pool is per
+ * origin rather than one pool for the process.
  */
 interface Pool {
   active: number
