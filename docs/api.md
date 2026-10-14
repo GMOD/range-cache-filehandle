@@ -149,7 +149,8 @@ cost of 256 KiB resident per touched region.
 
 Drop every chunk no read has touched for `CACHE_IDLE_TIMEOUT_MS`. The call is
 safe at any moment, including mid-fetch, because a read holds references to the
-chunks it will assemble, and the read re-fetches a chunk the sweep dropped.
+chunks it will assemble, and a later read that wants a dropped chunk re-fetches
+it.
 
 The library already calls `sweepIdleCache()` on an interval. Call it yourself to
 free memory sooner after an event the library cannot see, such as a tab going
