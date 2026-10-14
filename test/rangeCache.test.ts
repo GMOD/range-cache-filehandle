@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { expectBytes } from './expectBytes.ts'
-import { RemoteFileWithRangeCache, clearCache } from '../src/index.ts'
+import {
+  MAX_CACHE_ENTRIES,
+  RemoteFileWithRangeCache,
+  clearCache,
+} from '../src/index.ts'
 
 const CHUNK = 256 * 1024
 // mirrors CACHE_IDLE_TIMEOUT_MS and its interval; advancing by timeout +
@@ -626,7 +630,12 @@ describe('RemoteFileWithRangeCache', () => {
       if (m) {
         const start = Number(m[1])
         const end = Math.min(Number(m[2]), FILE_SIZE - 1)
-        if (requestedUrl(url) === mainUrl && start >= CHUNK) {
+        if (requestedUrl(url) !== mainUrl) {
+          // a flood file ends inside its first chunk: still one cache entry,
+          // without allocating 256 KiB for each
+          return new Response(slice(0, 99), { status: 206 })
+        }
+        if (start >= CHUNK) {
           await chunk1Gate
         }
         return new Response(slice(start, end), { status: 206 })
@@ -651,9 +660,9 @@ describe('RemoteFileWithRangeCache', () => {
     const end = CHUNK + 50
     const readPromise = read(mainUrl, start, end)
 
-    // Flood the shared LRU from other URLs past MAX_CACHE_ENTRIES (2000) so the
-    // FIFO eviction discards chunk 0's key while the read above is in flight.
-    for (let i = 0; i < 2100; i++) {
+    // Flood the shared LRU from other URLs past its cap so it evicts chunk 0's
+    // key while the read above is in flight.
+    for (let i = 0; i < MAX_CACHE_ENTRIES + 100; i++) {
       await read(`https://example.com/flood${i}.bin`, 0, 99)
     }
 
