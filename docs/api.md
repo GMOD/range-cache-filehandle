@@ -181,6 +181,24 @@ up after itself. The request does not put its chunks or the file's size back in
 the cache when it completes, so a file cleared while a read or `stat()` was in
 flight stays cleared.
 
+## `setChunkCacheLimit(bytes)`
+
+Hold at most `bytes` of chunks, for every file in the module instance. The
+default is `MAX_CACHE_ENTRIES * CHUNK_SIZE` (256 MiB). The limit rounds down to
+whole chunks, and lowering it evicts the least recently used chunks at once.
+
+- `0`, or anything under `CHUNK_SIZE`, caches nothing. Concurrent reads of one
+  chunk still share a single request.
+- `Infinity` removes the entry cap and leaves only the idle sweep.
+- A negative number, `NaN` or a non-number throws a `RangeError`.
+
+`clearCache` empties the cache but keeps the limit.
+
+## `cachedBytes()`
+
+The bytes of chunk data the cache holds now, summed on each call. A short chunk
+at the end of a file counts its real length.
+
 ## Constants
 
 `CHUNK_SIZE`, `MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT`,

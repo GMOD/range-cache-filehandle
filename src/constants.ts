@@ -15,6 +15,8 @@ export const CHUNK_SIZE = 256 * 1024
  * re-read falls through to here, and this is the only thing between it and the
  * network. Do not shrink it on the strength of a workload that stayed inside the
  * parsed budget.
+ *
+ * The default only: `setChunkCacheLimit` changes it for the whole module.
  */
 export const MAX_CACHE_ENTRIES = 1000
 

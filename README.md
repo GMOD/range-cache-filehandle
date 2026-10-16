@@ -50,7 +50,8 @@ const file = new CachedFilehandle(new LocalFile(path), `file://${path}`)
   once all of them abort. A reader passing no signal pins it for everyone.
 - Holds 1000 chunks (256 MB) per worker and sweeps chunks idle for 15 minutes.
   `clearCache()` drops everything, `clearCacheFor(key)` drops one file, and
-  `sweepIdleCache()` reclaims early.
+  `sweepIdleCache()` reclaims early. `setChunkCacheLimit(bytes)` changes the cap
+  and `cachedBytes()` reports what the cache holds.
 - Runs 20 requests at a time **per origin**.
 - Clamps reads past EOF once a size is known, from `Content-Range`, a 416, or
   `stat()`.

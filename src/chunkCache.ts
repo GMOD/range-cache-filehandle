@@ -109,6 +109,7 @@ interface SizeProbe {
 }
 
 let cache = new Map<string, CacheEntry>()
+let maxEntries = MAX_CACHE_ENTRIES
 /**
  * File size, keyed by cache key, parallel to the chunk cache. Per-instance state
  * cannot be used: a cache hit serving bytes from a previous instance's fetch
@@ -166,15 +167,44 @@ function evictOldest(map: Map<string, unknown>, max: number) {
 }
 
 function putCached(key: string, chunk: Uint8Array) {
+  if (maxEntries === 0) {
+    return
+  }
   // Delete before the size check, so that re-caching a key already present
   // neither evicts an innocent entry to make room for one already counted nor
   // leaves it at the rank it held before — `Map.set` on an existing key keeps
   // its position, so without this a chunk that was evicted and re-fetched goes
   // straight back to being first in line to be evicted again.
   cache.delete(key)
-  evictOldest(cache, MAX_CACHE_ENTRIES)
+  evictOldest(cache, maxEntries)
   cache.set(key, { bytes: chunk, lastTouched: Date.now() })
   startSweep()
+}
+
+/**
+ * Hold at most `bytes` of chunks, evicting the least recently used at once.
+ * The default is `MAX_CACHE_ENTRIES * CHUNK_SIZE`. 0 disables caching, though
+ * concurrent reads still share requests in flight; `Infinity` leaves only the
+ * idle sweep.
+ */
+export function setChunkCacheLimit(bytes: number) {
+  if (typeof bytes !== 'number' || !(bytes >= 0)) {
+    throw new RangeError(`a chunk cache limit is bytes >= 0, not ${bytes}`)
+  }
+  maxEntries = Math.floor(bytes / CHUNK_SIZE)
+  evictOldest(cache, maxEntries + 1)
+  if (cache.size === 0) {
+    stopSweep()
+  }
+}
+
+/** bytes of chunk data the cache holds now */
+export function cachedBytes() {
+  let bytes = 0
+  for (const entry of cache.values()) {
+    bytes += entry.bytes.byteLength
+  }
+  return bytes
 }
 
 /**
@@ -326,7 +356,7 @@ function markStale(entries: Iterable<{ stale: boolean }>) {
  *
  * What a consumer closing one track wants, and what {@link clearCache} is too
  * blunt for. Chunk keys are prefixed with the file key, so this is a scan of the
- * cache — bounded by {@link MAX_CACHE_ENTRIES}, and only on an explicit call.
+ * cache, only on an explicit call.
  *
  * Deliberately does not *cancel* in-flight requests: a read still waiting on one
  * is entitled to its bytes, and its own cleanup removes it. What those requests

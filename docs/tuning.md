@@ -7,6 +7,9 @@ because the cache is module-global, so a setting on one filehandle would apply
 to every other one in the process. `src/constants.ts` gives the same reasoning
 next to the values, and is the copy to update if a measurement changes.
 
+`setChunkCacheLimit(bytes)` changes the chunk cache's cap for the whole module
+instance, for a host that keeps its own copy of what it reads.
+
 | constant                | value         | bounds                                |
 | ----------------------- | ------------- | ------------------------------------- |
 | `CHUNK_SIZE`            | 256 KiB       | the grid a read snaps to              |
