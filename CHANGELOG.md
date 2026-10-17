@@ -1,3 +1,9 @@
+## [1.6.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.5.2...v1.6.0) (2026-10-17)
+
+### Other Changes
+
+- Add setChunkCacheLimit and cachedBytes ([90742d5](https://github.com/GMOD/range-cache-filehandle/commit/90742d53b85d517f69c6cf2a107ee0a0415d8740))
+
 ## [1.5.2](https://github.com/GMOD/range-cache-filehandle/compare/v1.5.1...v1.5.2) (2026-10-14)
 
 ### Other Changes
