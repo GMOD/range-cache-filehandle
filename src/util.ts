@@ -1,5 +1,3 @@
-import { CHUNK_SIZE } from './constants.ts'
-
 /**
  * `unref` a timer where that exists.
  *
@@ -67,10 +65,10 @@ export function parseContentRange(header: string | null) {
 /**
  * Let go of a body nobody is going to read.
  *
- * The 416 and the error statuses both leave `readRange` without reaching
- * `arrayBuffer()`. Under node a `Response` whose body is neither read nor
- * cancelled holds its connection out of undici's pool until GC, so a run of
- * 416s or 5xxs — exactly when a reader is retrying hard — exhausts the agent.
+ * The 416 and the error statuses both leave `readRange` without reaching the
+ * body. Under node a `Response` whose body is neither read nor cancelled holds
+ * its connection out of undici's pool until GC, so a run of 416s or 5xxs —
+ * exactly when a reader is retrying hard — exhausts the agent.
  */
 export function discardBody(res: Response) {
   // the body is being dropped either way, so a failure to cancel says nothing
@@ -80,47 +78,20 @@ export function discardBody(res: Response) {
 /**
  * The bytes of a response, refusing to hold more than `limit` of them.
  *
- * `res.arrayBuffer()` allocates whatever arrives, and a server with no range
- * support answers a range request with 200 and the whole file — so a `stat()`
- * of a 100 GB BAM allocated 100 GB to learn one number, and every 256 KiB read
- * of it allocated 100 GB again. Both died of memory or hung, on the one
- * misconfiguration this package has an exact message for.
- *
  * Undefined once more than `limit` bytes have arrived, with the rest of the
- * body cancelled unread. Deliberately measured against the bytes themselves
- * rather than against `Content-Length`: that header counts what is on the wire,
- * so a `Content-Encoding` makes it the compressed count, and cross-origin it is
- * `Content-Encoding` that the browser hides — it is not CORS-safelisted, while
- * `Content-Length` is — leaving a compressed count that is indistinguishable
- * from an honest one. A chunked body declares no length at all, which is what
- * nginx sends the moment it gzips. The body is the only thing that knows.
+ * body cancelled unread. Measured against the bytes themselves rather than
+ * against `Content-Length`: that header counts what is on the wire, so a
+ * `Content-Encoding` makes it the compressed count, and a chunked body declares
+ * no length at all. The body is the only thing that knows.
  *
  * Reads one step past `limit` on purpose: a body of exactly `limit` bytes is
  * within it, and only asking again separates that from one that goes on.
  */
 export async function readBodyAtMost(res: Response, limit: number) {
-  const { parts, total } = await readUpTo(res, limit)
-  return total > limit ? undefined : concat(parts, total)
-}
-
-/**
- * The first `limit` bytes of a response, with the rest of the body cancelled
- * unread: for a body whose bytes past `limit` nothing would ever look at.
- */
-export async function readBodyPrefix(res: Response, limit: number) {
-  const { parts, total } = await readUpTo(res, limit)
-  return concat(parts, Math.min(total, limit))
-}
-
-/**
- * Read until the body ends or more than `limit` bytes have arrived. A
- * Response-like from a custom `fetch` may have no `body` stream, and is read
- * whole.
- */
-async function readUpTo(res: Response, limit: number) {
   if (!res.body) {
+    // a Response-like from a custom `fetch` may have no body stream
     const bytes = new Uint8Array(await res.arrayBuffer())
-    return { parts: [bytes], total: bytes.byteLength }
+    return bytes.byteLength > limit ? undefined : bytes
   }
   const reader = res.body.getReader()
   const parts: Uint8Array[] = []
@@ -138,20 +109,15 @@ async function readUpTo(res: Response, limit: number) {
   if (!ended) {
     reader.cancel().catch(() => undefined)
   }
-  return { parts, total }
+  return total > limit ? undefined : concat(parts, total)
 }
 
-/** the first `length` bytes of `parts`, joined */
 function concat(parts: Uint8Array[], length: number) {
   const bytes = new Uint8Array(length)
   let at = 0
   for (const part of parts) {
-    if (at >= length) {
-      break
-    }
-    const take = part.subarray(0, length - at)
-    bytes.set(take, at)
-    at += take.byteLength
+    bytes.set(part, at)
+    at += part.byteLength
   }
   return bytes
 }
@@ -174,13 +140,10 @@ export function parseByteRange(range: string | null) {
 }
 
 /**
- * Refuse a read whose arguments the chunk arithmetic would launder into a
- * different, valid-looking request: a negative position becomes the suffix
- * range `bytes=-262144--1`, and a fractional one is floored during assembly.
- * Both come from an index that is corrupt or parsed against the wrong file.
- *
- * The length ceiling is what a `Uint8Array` can hold, because `planRead` walks
- * one entry per {@link CHUNK_SIZE} of the length before its first await.
+ * Refuse a read whose arguments would become a different, valid-looking
+ * request: a negative position becomes a suffix range, and a fractional one
+ * lands in a header the server can only reject. Both come from an index that is
+ * corrupt or parsed against the wrong file.
  */
 export function assertReadArgs(key: string, length: number, position: number) {
   if (Number.isNaN(length) || Number.isNaN(position)) {
@@ -197,42 +160,6 @@ export function assertReadArgs(key: string, length: number, position: number) {
     throw new TypeError(
       `read() of ${key} needs a non-negative safe-integer length and position (length=${length}, position=${position}); the index the offset came from is probably corrupt or being read against the wrong file`,
     )
-  }
-  if (length > MAX_READ_LENGTH) {
-    throw new TypeError(
-      `read() of ${key} asked for ${length} bytes, more than the ${MAX_READ_LENGTH} a Uint8Array can hold; the index the offset came from is probably corrupt or being read against the wrong file`,
-    )
-  }
-}
-
-/** what a `Uint8Array` can hold, and so the largest read worth attempting */
-const MAX_READ_LENGTH = 2 ** 32 - 1
-
-/**
- * Copy the part of `chunk` — the CHUNK_SIZE-aligned block at `chunkIndex` —
- * that overlaps the absolute byte range [start, end) into `result`, whose byte
- * 0 is absolute position `start`. Every offset is computed from absolute
- * positions, so a short chunk (one the file ended inside) cannot shift where
- * later chunks land, which an accumulate-as-you-go copy does silently.
- */
-export function copyChunkInto({
-  result,
-  start,
-  end,
-  chunkIndex,
-  chunk,
-}: {
-  result: Uint8Array
-  start: number
-  end: number
-  chunkIndex: number
-  chunk: Uint8Array
-}) {
-  const chunkStart = chunkIndex * CHUNK_SIZE
-  const from = Math.max(start, chunkStart)
-  const to = Math.min(end, chunkStart + chunk.length)
-  if (to > from) {
-    result.set(chunk.subarray(from - chunkStart, to - chunkStart), from - start)
   }
 }
 

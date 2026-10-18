@@ -1,27 +1,39 @@
-export const CHUNK_SIZE = 256 * 1024
-
 /**
- * Cached chunks own their bytes (see `fetchRun`), so this entry count is a true
- * bound on retained memory: `MAX_CACHE_ENTRIES * CHUNK_SIZE` = 256 MB per module
- * instance, and each worker gets its own.
+ * Bytes the cache holds per module instance before it evicts the least
+ * recently used. Each worker gets its own instance. `setCacheLimit` changes it.
  *
- * It looks oversized and is not. jbrowse measured panning twelve windows of a
- * 105 MB BAM and panning back: the second pass issues *zero* requests — a region
- * @gmod/bam has already parsed never reaches this layer — and on that workload
- * dropping this to 4 entries cost one extra range request and 1.3 MB. But that
- * measurement was taken with @gmod/bam's parsed cache under its 1 GB budget, so
- * it never evicted. On real data it does: a single 1000x track panned across a
- * 250 kb contig already peaks past that. Once the layer above is evicting, a
- * re-read falls through to here, and this is the only thing between it and the
- * network. Do not shrink it on the strength of a workload that stayed inside the
- * parsed budget.
- *
- * The default only: `setChunkCacheLimit` changes it for the whole module.
+ * jbrowse measured panning twelve windows of a 105 MB BAM and panning back: the
+ * second pass issues *zero* requests, because a region @gmod/bam has already
+ * parsed never reaches this layer. That measurement was taken with the parsed
+ * cache under its 1 GB budget, so it never evicted. On real data it does: a
+ * single 1000x track panned across a 250 kb contig peaks past that budget, and
+ * a re-read then falls through to here, the only thing between it and the
+ * network. Do not shrink this on the strength of a workload that stayed inside
+ * the parsed budget.
  */
-export const MAX_CACHE_ENTRIES = 1000
+export const CACHE_LIMIT = 256 * 1024 * 1024
 
 /**
- * Drop a chunk nothing has read for fifteen minutes.
+ * The planner's one length. A request shorter than this grows forward to it,
+ * and gaps that reads plan in the same microtask turn and that lie within it of
+ * each other share one request.
+ *
+ * Measured through @gmod/tabix, @gmod/bam, @gmod/bbi and @gmod/hic against a
+ * counting server, 64 KiB is the knee: 32 KiB costs the bigWig and .hic
+ * workloads requests (15 → 18 and 7 → 10), and 128 KiB adds bytes to the HPRC
+ * gene lanes (3.38 MB → 4.04 MB) for no request saved anywhere.
+ */
+export const MIN_REQUEST = 64 * 1024
+
+/**
+ * The cache stores a fetched body in pieces no longer than this, each owning
+ * its bytes, so eviction has a bounded unit: a 48 MB body for a 1000x BAM
+ * window does not stay whole for as long as any byte of it is wanted.
+ */
+export const PIECE_SIZE = 1024 * 1024
+
+/**
+ * Drop an extent nothing has read for fifteen minutes.
  *
  * Longer than the three minutes the parsed caches above use (@gmod/bam,
  * @gmod/cram and @gmod/tabix all take a `cacheIdleTimeoutMs`), and deliberately
@@ -39,13 +51,13 @@ export const MAX_CACHE_ENTRIES = 1000
 export const CACHE_IDLE_TIMEOUT_MS = 15 * 60 * 1000
 
 /**
- * A quarter of the timeout, so the lag between a chunk going idle and being
+ * A quarter of the timeout, so the lag between an extent going idle and being
  * dropped is ~1.25x it rather than 2x.
  *
  * Chrome's intensive throttling of a hidden page — timers checked once a minute
  * after five minutes hidden — does not reach this where it matters: workers are
  * not throttled, and the workers are where the bytes are. On the main thread it
- * costs some lag on a cache measured holding no chunks at all.
+ * costs some lag on a cache measured holding nothing at all.
  */
 export const SWEEP_INTERVAL_MS = CACHE_IDLE_TIMEOUT_MS / 4
 
@@ -89,7 +101,7 @@ export const MAX_CONCURRENT = 20
 /**
  * How many file sizes to remember.
  *
- * The chunk cache is bounded and swept, so it self-heals; the size cache is
+ * The byte cache is bounded and swept, so it self-heals; the size cache is
  * neither, because one number per file is cheap enough to keep and costs a
  * round trip to re-derive. That reasoning holds for a key per *file* and breaks
  * for a key per *URL*: presigned S3 and GCS URLs carry an expiring signature in

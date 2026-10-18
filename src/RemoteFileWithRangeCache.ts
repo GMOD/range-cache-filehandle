@@ -1,13 +1,12 @@
 import { RemoteFile } from 'generic-filehandle2'
 
-import { getCachedRange, probeSize, recordSize } from './chunkCache.ts'
-import { CHUNK_SIZE } from './constants.ts'
 import {
   isNetworkRejection,
   networkFailureHint,
   statusHint,
   withResponseDeadline,
 } from './errors.ts'
+import { getCachedRange, probeSize, recordSize } from './extentCache.ts'
 import {
   assertReadArgs,
   discardBody,
@@ -15,38 +14,38 @@ import {
   parseByteRange,
   parseContentRange,
   readBodyAtMost,
-  readBodyPrefix,
 } from './util.ts'
 
-import type { FetchedRange } from './chunkCache.ts'
+import type { FetchedRange } from './extentCache.ts'
 import type { FilehandleOptions } from 'generic-filehandle2'
 
 /**
- * A `RemoteFile` whose reads go through a module-global chunk cache.
+ * A `RemoteFile` whose reads go through a module-global cache of the byte
+ * extents fetched so far.
  *
- * Two things follow from that, and they are the whole point of the class:
- * contiguous chunks a read is missing become **one** range request rather than
- * one per read, and a chunk another read already has in flight is awaited rather
- * than requested again.
+ * Two things follow from that, and they are the whole point of the class: a
+ * read fetches only the bytes no earlier read has fetched or is fetching, as
+ * one request per cluster of gaps, and a read that overlaps a request another
+ * read has in flight awaits it rather than asking for the same bytes again.
  */
 export class RemoteFileWithRangeCache extends RemoteFile {
   /**
    * Publish a size this handle learned other than by a range request.
    *
-   * A subclass that overrides `stat` answers from somewhere the chunk cache
-   * never sees — a cloud provider's metadata endpoint, say — and so leaves the
-   * size cache empty for its URL however many times it is called. That clamp is
-   * not an optimization: @gmod/bam and @gmod/tabix compute their last read of a
+   * A subclass that overrides `stat` answers from somewhere the cache never
+   * sees — a cloud provider's metadata endpoint, say — and so leaves the size
+   * cache empty for its URL however many times it is called. That clamp is not
+   * an optimization: @gmod/bam and @gmod/tabix compute their last read of a
    * file to include the whole final bgzf block, so it runs past EOF by
-   * construction, and without a known size that tail asks for chunks starting
-   * past the end and the server answers 416.
+   * construction, and without a known size that tail asks for bytes past the
+   * end and the server answers 416.
    */
   protected recordSize(size: number) {
     recordSize(this.url, size)
   }
 
   async stat() {
-    // Bypasses the chunk cache, where a cached chunk would answer without the
+    // Bypasses the cache, where a cached extent would answer without the
     // Content-Range that carries the size
     const size = await probeSize(
       this.url,
@@ -92,6 +91,14 @@ export class RemoteFileWithRangeCache extends RemoteFile {
   /**
    * The bytes of a response, once its status and its claims check out, and the
    * file's total length if the response gave it.
+   *
+   * Three checks, for a server that supports ranges: the status is a 206, the
+   * `Content-Range` starts where the request did, and the body is the length
+   * the header declares — or, with no readable header, no longer than the
+   * request. A body shorter than the request is the end of the file. A 200
+   * means the server ignored the Range header, and its body starts at byte 0
+   * whatever offset was asked for, so it is refused with a hint rather than
+   * sliced into bytes from the wrong position.
    */
   private async readRange(
     res: Response,
@@ -102,16 +109,10 @@ export class RemoteFileWithRangeCache extends RemoteFile {
     if (res.status === 416) {
       // Range Not Satisfiable: requested range starts past end of file. RFC 9110
       // §15.5.17 has the server report the real length here, as `bytes * /12345`
-      // (the unsatisfied-range form of Content-Range, §14.4), and
-      // that is the one thing this response carries worth keeping: learning the
-      // size lets getCachedRange clamp every later over-read instead of asking
-      // for past-EOF chunks and being refused again. It is also the only way
+      // (the unsatisfied-range form of Content-Range, §14.4), and that is the
+      // one thing this response carries worth keeping. It is also the only way
       // stat() can answer for an empty file, every range of which is
-      // unsatisfiable.
-      //
-      // The empty result is only cached as an EOF marker if the size it carried
-      // confirms the range really was past the end; see isKnownPastEof. A 416
-      // that explains nothing is answered, but not remembered.
+      // unsatisfiable. Without it, the request's own start bounds the size.
       const total = parseContentRange(res.headers.get('content-range'))?.total
       discardBody(res)
       if (total !== undefined && start < total) {
@@ -124,22 +125,38 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       }
       return { bytes: new Uint8Array(0), total }
     }
-    assertServedTheRange(res, url, start, end)
-    if (res.status === 200) {
-      // no Content-Range on a 200, but the body is the entire file
-      const bytes = await readWholeFile(res, url, start, end)
-      return { bytes, total: bytes.byteLength }
-    } else {
-      const range = parseContentRange(res.headers.get('content-range'))
-      const bytes = await readDeclaredRange(res, url, end - start + 1, range)
-      // A response this rejects has still told us a `total`, and the size cache
-      // never overwrites one, so returning it lets a proxy with a wrong
-      // Content-Range fix the size of the file at whatever it claimed: every
-      // later read clamped to it and stat() answering with it, for the life of
-      // the process.
-      assertBodyMatchesRange(res, url, start, end, bytes, range)
-      return { bytes, total: range?.total }
+    if (res.status !== 206) {
+      const msg = `HTTP ${res.status} fetching ${url} bytes ${start}-${end}${statusHint(res.status)}`
+      discardBody(res)
+      throw Object.assign(new Error(msg), { status: res.status })
     }
+    const range = parseContentRange(res.headers.get('content-range'))
+    if (range?.start !== undefined && range.start !== start) {
+      discardBody(res)
+      throw new Error(
+        `${url} answered bytes ${range.start}-${range.end} for a request for bytes starting at ${start} (the response does not describe the range that was asked for, so its bytes would land at the wrong offsets; a caching proxy in front of the file is the usual cause)`,
+      )
+    }
+    // Read no more than the header declares, so a proxy streaming the whole
+    // file behind an honest header costs the request rather than the file.
+    const declared =
+      range?.start === undefined || range.end === undefined
+        ? undefined
+        : range.end - range.start + 1
+    const bytes = await readBodyAtMost(res, declared ?? end - start + 1)
+    if (bytes === undefined) {
+      throw new Error(
+        declared === undefined
+          ? `${url} sent more than the ${end - start + 1} bytes requested for bytes ${start}-${end} with no Content-Range to say what they are (the body cannot be placed, so it is not trusted; a server ignoring the Range header or a caching proxy in front of the file is the usual cause)`
+          : `${url} sent more than the ${declared} bytes of the range ${range!.start}-${range!.end} it declared (the body runs past its own Content-Range, so neither the header nor the bytes can be trusted; a caching proxy in front of the file is the usual cause)`,
+      )
+    }
+    if (declared !== undefined && bytes.byteLength !== declared) {
+      throw new Error(
+        `${url} sent ${bytes.byteLength} bytes for bytes ${range!.start}-${range!.end}, which is ${declared} bytes (the body is truncated; left alone this is indistinguishable from the file ending here and would be cached as such)`,
+      )
+    }
+    return { bytes, total: range?.total }
   }
 
   /**
@@ -154,8 +171,8 @@ export class RemoteFileWithRangeCache extends RemoteFile {
    * The deadline is stood down once the headers arrive, so a large body may
    * take as long as it takes.
    *
-   * Deliberately here rather than a layer up: this call is the shared one.
-   * fetchRun coalesces every reader of these chunks onto it, so the deadline
+   * Deliberately here rather than a layer up: this call is the shared one. The
+   * cache coalesces every reader of these bytes onto it, so the deadline
    * belongs to the request and fails all of them together — one stalled reader
    * with a deadline of its own would strand the rest on a fetch nobody is
    * watching any more.
@@ -212,9 +229,8 @@ export class RemoteFileWithRangeCache extends RemoteFile {
   }
 
   /**
-   * Bytes straight out of the chunk cache, skipping the `Response` that
-   * `RemoteFile.fetchBytes` would build and unwrap. The length ceiling is ours:
-   * `planRead` walks one entry per chunk before its first await.
+   * Bytes straight out of the cache, skipping the `Response` that
+   * `RemoteFile.fetchBytes` would build and unwrap.
    */
   protected override async fetchBytes(
     length: number,
@@ -249,12 +265,6 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       return this.fetchWithDeadline(url, init)
     }
     const length = range.end - range.start + 1
-    // The same guard `fetchBytes` applies, for the same reason one layer down.
-    // `parseByteRange` accepts any pair of digits, and the chunk machinery
-    // walks one iteration, promise and in-flight entry per CHUNK_SIZE of the
-    // length before its first await: measured, `bytes=0-99999999999999` spent
-    // 112 seconds in `planRead` and then took the process out with a heap OOM
-    // rather than ever reaching the network.
     assertReadArgs(url, length, range.start)
     const buffer = await this.cachedRange(url, range.start, length, init)
     return new Response(buffer, { status: 206 })
@@ -299,214 +309,5 @@ function describeFetchFailure(
     )
   } else {
     return e
-  }
-}
-
-/**
- * Reject a status that cannot be read as the range that was asked for.
- *
- * A 200 means the server ignored the Range header and sent the whole file (some
- * servers do this rather than clamping a range whose end is past EOF). The body
- * then starts at byte 0, but callers slice it at the offsets they asked for, so
- * every chunk past the first would be filled with data from the wrong position —
- * silently, and typically surfacing much later as a parse error like "invalid
- * bgzf header". Only tolerate it when the request started at 0, where the body
- * genuinely covers the requested bytes. This mirrors the check in
- * generic-filehandle2's `RemoteFile.fetchBytes`, which this class overrides.
- */
-function assertServedTheRange(
-  res: Response,
-  url: string,
-  start: number,
-  end: number,
-) {
-  if (!res.ok || (res.status !== 206 && start !== 0)) {
-    const msg = `HTTP ${res.status} fetching ${url} bytes ${start}-${end}${statusHint(res.status)}`
-    discardBody(res)
-    throw Object.assign(new Error(msg), { status: res.status })
-  }
-}
-
-/**
- * The whole file, from a server that ignored the Range header — but only as
- * much of it as the range asked for.
- *
- * A 200 to a range request means there is no range support here, and
- * {@link assertServedTheRange} already refuses that anywhere but at offset 0,
- * where the body does at least begin with the bytes that were wanted. What it
- * cannot refuse is the *size* of what is coming, and that is the half that
- * hurts: reading a body allocates all of it, so `stat()` of a 100 GB BAM on
- * such a server allocated 100 GB to learn one number, and every 256 KiB read of
- * it allocated 100 GB again. Both died of memory or hung, with nothing said —
- * on the one misconfiguration this package can name exactly, and already has a
- * hint written for.
- *
- * So the body is read under a ceiling and the request fails the moment it goes
- * past. Under the ceiling it is served: a file shorter than the range asked for
- * is the honest case the offset-0 tolerance exists for — the whole of it *is*
- * the range — and its length is the length of the file, which is how a `stat()`
- * of a small file on a range-ignoring server still answers.
- *
- * The ceiling is at least {@link CHUNK_SIZE} because the size probe asks for a
- * single byte. Left at the range asked for, the smallest request there is would
- * refuse every file bigger than one byte, and a small file on a server with no
- * range support — which this package can serve perfectly well, one chunk at a
- * time — would stop working.
- *
- * Nothing here reads `Content-Length`. It counts the bytes on the wire, so a
- * `Content-Encoding` makes it the compressed count, and `Content-Encoding` is
- * the header a browser withholds cross-origin while showing `Content-Length` —
- * so trusting it recorded a gzipped file's compressed size as the size of the
- * file, and reads past that point were then clamped to nothing and returned
- * empty rather than failing. Only the bytes know how many there are.
- */
-async function readWholeFile(
-  res: Response,
-  url: string,
-  start: number,
-  end: number,
-) {
-  const buffer = await readBodyAtMost(
-    res,
-    Math.max(end - start + 1, CHUNK_SIZE),
-  )
-  if (buffer === undefined) {
-    throw Object.assign(
-      new Error(
-        `HTTP 200 fetching ${url} bytes ${start}-${end}${statusHint(200)}`,
-      ),
-      { status: 200 },
-    )
-  }
-  return buffer
-}
-
-/**
- * The bytes of a 206, holding no more of them than it said it was sending.
- *
- * `assertBodyMatchesRange` below has always compared the body against the range
- * the header declared, but it could only do that once the body was already in
- * memory — so a proxy answering a 256 KiB request with an honest
- * `bytes 0-262143/...` and then streaming the whole file allocated the whole
- * file and *then* reported the mismatch. Measured: 8 MB held for a 262144-byte
- * request. Same rule, applied a step earlier, where it costs the ceiling rather
- * than the file.
- *
- * Only where the header says how long the range is and the body is those bytes
- * — the same two conditions the length check downstream is already gated on. A
- * `Content-Range` hidden by CORS leaves nothing to check against, and under a
- * `Content-Encoding` the bytes on the wire are not the bytes of the range. Both
- * stop reading after the `requested` bytes, because nothing past them is ever
- * used: the run is cut into chunks from its start, so a proxy streaming the
- * whole file costs the request, not the file.
- */
-async function readDeclaredRange(
-  res: Response,
-  url: string,
-  requested: number,
-  range: ReturnType<typeof parseContentRange>,
-) {
-  if (
-    range?.start === undefined ||
-    range.end === undefined ||
-    range.end < range.start ||
-    res.headers.get('content-encoding')
-  ) {
-    return readBodyPrefix(res, requested)
-  }
-  const declared = range.end - range.start + 1
-  const buffer = await readBodyAtMost(res, declared)
-  if (buffer === undefined) {
-    throw new Error(
-      `${url} sent more than the ${declared} bytes of the range ${range.start}-${range.end} it declared (the body runs past its own Content-Range, so neither the header nor the bytes can be trusted; a caching proxy in front of the file is the usual cause)`,
-    )
-  }
-  return buffer
-}
-
-/**
- * Reject a 206 whose body is not the bytes it claims to be.
- *
- * Nothing downstream can tell a short response from the end of the file: a chunk
- * shorter than CHUNK_SIZE *is* how EOF is represented, so a proxy that truncates
- * a body, or a cache that answers with some other range it had lying around,
- * lands in the chunk cache as a file that ends early. Measured with a proxy
- * cutting each body to 1000 bytes, a read at offset 5000 of a 2 MB file returned
- * zero bytes and issued no request — and kept doing so for the whole idle
- * window, for every handle sharing the URL.
- *
- * Four things are checked, in two groups, and which group a check belongs to is
- * decided by whether it reads the body.
- *
- * The first two read only the header. The range has to describe itself
- * coherently — ending at or after where it starts, and before the end of the
- * file it reports — and it has to start where the request did.
- *
- * The second two compare the body against that header: it has to be as long as
- * the range says — a body *longer* than that never reaches here, having been
- * stopped at the ceiling by {@link readDeclaredRange} — and the range has to
- * reach either the end that was asked for or the end of the file. Without the last, a proxy that caps how much of a
- * range it will serve answers a 6 MB request with an accurate
- * `bytes 0-1048575/8388608` and a matching 1 MB body: honest about itself,
- * silently short against the request, and indistinguishable from EOF by the
- * time it reaches the chunk cache.
- * @see https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.7 (206)
- * @see https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4 (Content-Range)
- *
- * A range *longer* than the one asked for passes: the extra bytes are sliced
- * off, and a server aligning to its own block size is doing nothing harmful.
- *
- * Skipped entirely when there is no `Content-Range` to check against. A
- * `Content-Encoding` skips only the second group, because the body on the wire
- * is then not the bytes of the range and its length says nothing — but the
- * header still has to be coherent and still has to be the range that was asked
- * for, and skipping those along with it let one added header take a truncated
- * body all the way into the cache as an early EOF.
- */
-function assertBodyMatchesRange(
-  res: Response,
-  url: string,
-  start: number,
-  end: number,
-  buffer: Uint8Array,
-  range: ReturnType<typeof parseContentRange>,
-) {
-  if (range?.start === undefined || range.end === undefined) {
-    return
-  }
-  // A range that ends before it begins, or at or past the length it reports,
-  // is not a range. Left alone the arithmetic below launders it into a
-  // nonsense message, and `recordSizeIfUnknown` takes the total it carried:
-  // measured, a 206 answering `bytes 0-262143/100` fixed the file at 100 bytes
-  // for every handle on the URL, so a read at offset 200 returned nothing and
-  // stat() reported 100.
-  if (
-    range.end < range.start ||
-    (range.total !== undefined && range.end >= range.total)
-  ) {
-    throw new Error(
-      `${url} answered Content-Range "bytes ${range.start}-${range.end}/${range.total ?? '*'}", which does not describe a range of a file that size (the header contradicts itself, so neither the bytes it labels nor the length it reports can be trusted; a caching proxy in front of the file is the usual cause)`,
-    )
-  }
-  if (range.start !== start) {
-    throw new Error(
-      `${url} answered bytes ${range.start}-${range.end} for a request for bytes starting at ${start} (the response does not describe the range that was asked for, so its bytes would land at the wrong offsets; a caching proxy in front of the file is the usual cause)`,
-    )
-  }
-  if (res.headers.get('content-encoding')) {
-    return
-  }
-  const expected = range.end - range.start + 1
-  if (buffer.byteLength !== expected) {
-    throw new Error(
-      `${url} sent ${buffer.byteLength} bytes for bytes ${range.start}-${range.end}, which is ${expected} bytes (the body is truncated; left alone this is indistinguishable from the file ending here and would be cached as such)`,
-    )
-  }
-  // only against a known total: with `bytes 0-255/*` there is no EOF to compare
-  // a short range against, so there is nothing here to be sure about
-  if (range.total !== undefined && range.end < Math.min(end, range.total - 1)) {
-    throw new Error(
-      `${url} served bytes ${range.start}-${range.end} of a request for bytes ${start}-${end} of a ${range.total}-byte file (the response stops short of both the end asked for and the end of the file, so the bytes past it would be cached as EOF; a proxy capping how much of a range it will serve is the usual cause)`,
-    )
   }
 }

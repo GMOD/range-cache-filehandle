@@ -1,4 +1,4 @@
-import { getCachedRange, recordSize } from './chunkCache.ts'
+import { getCachedRange, recordSize } from './extentCache.ts'
 import { assertReadArgs } from './util.ts'
 
 import type {
@@ -10,17 +10,17 @@ import type {
 } from 'generic-filehandle2'
 
 /**
- * The same chunk cache, in front of any filehandle.
+ * The same cache, in front of any filehandle.
  *
  * {@link RemoteFileWithRangeCache} gets its cache by *being* a `RemoteFile`, so
  * for as long as that was the only entry point, local paths and blobs got no
  * caching at all. Nothing in the cache is about HTTP, so this wraps whatever it
  * is given instead.
  *
- * `key` namespaces this file's chunks in the module-global cache, so it has to
+ * `key` namespaces this file's bytes in the module-global cache, so it has to
  * identify the underlying bytes: a path or a URL for something with a stable
  * name, and something instance-unique for a Blob, which has no name to key on.
- * Two wrappers sharing a key share chunks, which is right for two handles on
+ * Two wrappers sharing a key share bytes, which is right for two handles on
  * one path and wrong for two unrelated blobs.
  */
 export class CachedFilehandle implements GenericFilehandle {
@@ -63,7 +63,7 @@ export class CachedFilehandle implements GenericFilehandle {
       // everything the caller passed reaches the inner handle, since it may
       // be a filehandle for which `headers` and `overrides` mean something —
       // a RemoteFile, or one of its subclasses. Only the signal is replaced:
-      // the request belongs to the run, which outlives any one reader of it
+      // the request is shared, and outlives any one reader of it
       async (start, end, signal) => ({
         bytes: await this.inner.read(end - start + 1, start, {
           ...opts,
@@ -73,9 +73,9 @@ export class CachedFilehandle implements GenericFilehandle {
     )
   }
 
-  // Whole-file reads bypass the chunk cache: they are one pass over bytes the
-  // caller is about to hold in full anyway, so chunking them would double the
-  // peak for no reuse. This is what `RemoteFile.readFile` does too.
+  // Whole-file reads bypass the cache: they are one pass over bytes the caller
+  // is about to hold in full anyway, so caching them would double the peak for
+  // no reuse. This is what `RemoteFile.readFile` does too.
   readFile(options?: ReadFileOptions): Promise<Uint8Array<ArrayBuffer>>
   readFile(options: ReadFileTextOptions): Promise<string>
   readFile(

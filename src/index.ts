@@ -4,14 +4,15 @@ export {
   cachedBytes,
   clearCache,
   clearCacheFor,
-  setChunkCacheLimit,
+  setCacheLimit,
   sweepIdleCache,
-} from './chunkCache.ts'
+} from './extentCache.ts'
 export {
   CACHE_IDLE_TIMEOUT_MS,
-  CHUNK_SIZE,
-  MAX_CACHE_ENTRIES,
+  CACHE_LIMIT,
   MAX_CONCURRENT,
   MAX_SIZE_ENTRIES,
+  MIN_REQUEST,
+  PIECE_SIZE,
   RESPONSE_TIMEOUT_MS,
 } from './constants.ts'
