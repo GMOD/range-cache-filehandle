@@ -21,29 +21,26 @@ digraph rangecache {
   read    [label="read(length, position, { signal })" fillcolor="#ddf4ff" color="#0969da"]
   guard   [label="signal.throwIfAborted()"]
   clamp   [label="clamp to known size" fillcolor="#fff8c5" color="#9a6700"]
-  plan    [label="chunk grid: floor(pos / 256 KiB)"]
-  hit     [label="chunk cache" fillcolor="#fff8c5" color="#9a6700"]
-  join    [label="in-flight chunk" fillcolor="#fff8c5" color="#9a6700"]
-  runs    [label="coalesce misses into runs"]
-  limit   [label="limitConcurrency (20)" fillcolor="#fff8c5" color="#9a6700"]
-  fetch   [label="one range request per run" fillcolor="#dafbe1" color="#1a7f37"]
-  split   [label="slice run into chunks, cache each" fillcolor="#fff8c5" color="#9a6700"]
+  cover   [label="cached extents + requests in flight" fillcolor="#fff8c5" color="#9a6700"]
+  turn    [label="wait one microtask for the turn's other reads"]
+  plan    [label="grow each gap to 64 KiB, merge gaps within 64 KiB"]
+  limit   [label="limitConcurrency (20 per origin)" fillcolor="#fff8c5" color="#9a6700"]
+  fetch   [label="one range request per merged gap" fillcolor="#dafbe1" color="#1a7f37"]
+  store   [label="store the body in pieces of ≤ 1 MiB" fillcolor="#fff8c5" color="#9a6700"]
   after   [label="signal.throwIfAborted()"]
   asm     [label="assemble, truncate at EOF"]
   out     [label="Uint8Array" fillcolor="#ddf4ff" color="#0969da"]
 
   read -> guard
   guard -> clamp
-  clamp -> plan
-  plan -> hit
-  hit -> asm [label=" hit "]
-  hit -> join [label=" miss "]
-  join -> asm [label=" join the run "]
-  join -> runs [label=" miss "]
-  runs -> limit [label=" ChunkRun[] "]
+  clamp -> cover
+  cover -> asm [label=" no gaps "]
+  cover -> turn [label=" gaps "]
+  turn -> plan
+  plan -> limit
   limit -> fetch
-  fetch -> split
-  split -> asm
+  fetch -> store
+  store -> asm
   asm -> after
   after -> out
 

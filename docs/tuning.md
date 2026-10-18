@@ -1,41 +1,70 @@
 # The constants, and what measured them
 
-Six constants are exported for reading, not setting: `CHUNK_SIZE`,
-`MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT`,
+Seven constants are exported for reading, not setting: `MIN_REQUEST`,
+`PIECE_SIZE`, `CACHE_LIMIT`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT`,
 `MAX_SIZE_ENTRIES` and `RESPONSE_TIMEOUT_MS`. There is no per-instance override,
 because the cache is module-global, so a setting on one filehandle would apply
 to every other one in the process. `src/constants.ts` gives the same reasoning
 next to the values, and is the copy to update if a measurement changes.
 
-`setChunkCacheLimit(bytes)` changes the chunk cache's cap for the whole module
-instance, for a host that keeps its own copy of what it reads.
+`setCacheLimit(bytes)` changes the cap for the whole module instance, for a host
+that keeps its own copy of what it reads.
 
-| constant                | value         | bounds                                |
-| ----------------------- | ------------- | ------------------------------------- |
-| `CHUNK_SIZE`            | 256 KiB       | the grid a read snaps to              |
-| `MAX_CACHE_ENTRIES`     | 1000 (256 MB) | retained bytes, per module instance   |
-| `CACHE_IDLE_TIMEOUT_MS` | 15 min        | how long an unread chunk stays cached |
-| `MAX_CONCURRENT`        | 20            | requests in flight, **per origin**    |
-| `MAX_SIZE_ENTRIES`      | 5000          | file sizes remembered                 |
-| `RESPONSE_TIMEOUT_MS`   | 30 s          | wait for a response to _begin_        |
+| constant                | value   | bounds                                       |
+| ----------------------- | ------- | -------------------------------------------- |
+| `MIN_REQUEST`           | 64 KiB  | the shortest request, and the merge distance |
+| `PIECE_SIZE`            | 1 MiB   | the largest unit eviction drops              |
+| `CACHE_LIMIT`           | 256 MiB | retained bytes, per module instance          |
+| `CACHE_IDLE_TIMEOUT_MS` | 15 min  | how long unread bytes stay cached            |
+| `MAX_CONCURRENT`        | 20      | requests in flight, **per origin**           |
+| `MAX_SIZE_ENTRIES`      | 5000    | file sizes remembered                        |
+| `RESPONSE_TIMEOUT_MS`   | 30 s    | wait for a response to _begin_               |
 
 We chose each value for one workload: a genome browser panning a track in a
 browser tab. [Where this runs](#where-this-runs) covers what changes for other
 workloads.
 
-## `MAX_CACHE_ENTRIES` looks oversized and is not
+## `MIN_REQUEST`
 
-`fetchRun` copies each chunk out of the run buffer rather than taking a view, so
-no chunk keeps a run buffer alive. The entry count therefore bounds memory at
-`MAX_CACHE_ENTRIES * CHUNK_SIZE` per module instance, and each worker has its
-own instance.
+One length does two jobs. A gap shorter than it grows forward to it, which is
+readahead for a parser that will read the next block soon, and two gaps planned
+in the same turn within it of each other share a request.
+
+A simulator replayed read traces recorded from the real parsers. It matched
+1.6.0 byte for byte on every workload, and the library built from it lands
+within one request of it. Cold pass, MB / requests:
+
+| `MIN_REQUEST` | gene lanes    | bigWig        | `.hic`       |
+| ------------- | ------------- | ------------- | ------------ |
+| 0, no merging | 3.32 / 32     | 0.23 / 25     | 1.09 / 669   |
+| 32 KiB        | 3.33 / 32     | 0.61 / 18     | 4.09 / 10    |
+| **64 KiB**    | **3.38 / 32** | **0.98 / 15** | **4.31 / 7** |
+| 128 KiB       | 4.04 / 32     | 1.71 / 14     | 4.52 / 7     |
+
+64 KiB is the knee. Below it bigWig and `.hic` pay requests; above it the gene
+lanes pay bytes and nothing pays fewer requests. The BAM workloads barely move
+across the range, because their reads are already long.
+
+## `PIECE_SIZE`
+
+The cache stores a body in pieces of at most 1 MiB, each owning its bytes, and
+the LRU evicts whole pieces. Without a cap a 48 MB body for one 1000x BAM window
+would stay whole for as long as any byte of it was wanted. Much smaller pieces
+cost a list entry per piece and buy nothing: the reads that matter are 64 KiB or
+longer.
+
+## `CACHE_LIMIT` looks oversized and is not
+
+Each piece is a copy rather than a view, so no piece keeps a whole body alive,
+and the byte count bounds memory at `CACHE_LIMIT` per module instance. Each
+worker has its own instance.
 
 jbrowse measured panning twelve windows of a 105 MB BAM and panning back. The
-second pass issues zero requests, and on that workload a cache of **four**
-entries cost one extra range request and 1.3 MB. That result does not justify
-shrinking the cache, because in that run `@gmod/bam`'s parsed cache stayed under
-its 1 GB budget and never evicted, and a region the parser has already parsed
-never reaches this layer.
+second pass issues zero requests, and on that workload 1.6.0 holding only four
+256 KiB chunks cost one extra range request and 1.3 MB. That result does not
+justify shrinking the cache, because in that run `@gmod/bam`'s parsed cache
+stayed under its 1 GB budget and never evicted, and a region the parser has
+already parsed never reaches this layer.
 
 On real data the parsed cache does evict, because a single 1000x track panned
 across a 250 kb contig already peaks past that budget. A re-read then falls
@@ -45,7 +74,7 @@ parsed budget.
 
 ## `CACHE_IDLE_TIMEOUT_MS` is longer than the caches above it, deliberately
 
-This layer keeps chunks for fifteen minutes, while `@gmod/bam`, `@gmod/cram` and
+This layer keeps bytes for fifteen minutes, while `@gmod/bam`, `@gmod/cram` and
 `@gmod/tabix` all take a `cacheIdleTimeoutMs` that defaults to three minutes
 ([bam-js/docs/caching.md](https://github.com/GMOD/bam-js/blob/main/docs/caching.md),
 [cram-js/docs/memory.md](https://github.com/GMOD/cram-js/blob/main/docs/memory.md)).
@@ -57,13 +86,13 @@ three-minute timeout to match theirs, this cache expired at the moment it became
 the only one helping. In our measurement, a reader who stepped away for four
 minutes re-downloaded all 73.5 MB of a pan.
 
-We added the sweep because holding every chunk forever left 100 MB per worker
+We added the sweep because holding everything forever left 100 MB per worker
 resident after the track closed, after the tab hid, and after four minutes idle.
-Fifteen minutes bounds that without the cost of holding chunks forever.
+Fifteen minutes bounds that without the cost of holding bytes forever.
 
-The sweep runs on an interval of a quarter of the timeout, so the lag between a
-chunk going idle and being dropped is ~1.25x the timeout rather than 2x. The
-interval starts with the first cached chunk and stops when a sweep empties the
+The sweep runs on an interval of a quarter of the timeout, so the lag between
+bytes going idle and being dropped is ~1.25x the timeout rather than 2x. The
+interval starts with the first cached extent and stops when a sweep empties the
 cache, so it does no work while the cache is empty. Chrome's intensive
 throttling of a hidden page does not affect the sweep where it matters, because
 Chrome does not throttle workers, and the workers hold the bytes.
@@ -140,34 +169,34 @@ Three limits remain:
 
 The cache is module state, so its scope is one module instance: **one per
 realm**, not one per process and not one per filehandle. A page and each of its
-workers get their own, and so does each worker thread in node. The 256 MB bound
+workers get their own, and so does each worker thread in node. The 256 MiB bound
 is per instance, so a browser with six worker threads has a ceiling of 1.5 GB
 and no single place that tracks the total.
 
 We chose every number above for this per-realm scoping, as jbrowse deploys it: a
 browser session panning a track, where the same person reads the same region
-again a minute later and 256 MB of a device's memory is a reasonable ask.
+again a minute later and 256 MiB of a device's memory is a reasonable ask.
 
 Consider these other deployments before taking the defaults.
 
 **A long-lived server process** shares one cache across every request it serves,
 keyed by URL. Sharing helps when many requests hit the same few files, and only
 costs memory when each request reads a file no other request will touch, because
-the chunks stay for fifteen minutes waiting for a re-read that never comes. If
+the bytes stay for fifteen minutes waiting for a re-read that never comes. If
 your traffic is the second kind, call `clearCache()` when a job finishes, or
 `sweepIdleCache()` on a shorter interval of your own. Neither cancels work in
 flight, so both are safe to call from a request handler.
 
 The cache has no per-file or per-tenant bound. One large file can fill the cache
-and evict every chunk of every other file, which in a browser is what you want
+and evict every byte of every other file, which in a browser is what you want
 (the user is looking at one track) and on a shared server may not be.
 
 **A short script** that reads a file once, writes something out and exits needs
 none of this, and the cache costs it little. The script will not read its cached
-chunks again, and the ceiling caps that waste at 256 MB. Both timers are
+bytes again, and the ceiling caps that waste at 256 MiB. Both timers are
 `unref`'d, so neither the sweep interval nor a pending response deadline holds
 the process open, and a script that finishes exits without calling anything.
 
 **A `LocalFile` under `CachedFilehandle`** may not be worth it. A local read
-makes no request to coalesce, so the only benefit is reuse, at 256 KiB resident
-per touched region; see [api.md](api.md#new-cachedfilehandleinner-key).
+makes no request to coalesce, so the only benefit is reuse, at 64 KiB or more
+resident per touched region; see [api.md](api.md#new-cachedfilehandleinner-key).

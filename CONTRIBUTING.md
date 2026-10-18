@@ -32,10 +32,10 @@ pnpm diagrams
 
 `docs/img/architecture.dot` is the call graph. Each node is a function in
 `src/`, each edge is a call the source makes, and each number comes from
-`constants.ts`. `docs/img/chunks.svg` is drawn by _running_ the chunk cache
-against a recording `fetch`, so its chunk states and range headers show what
-that read did. `test/diagrams.test.ts` regenerates both and compares, and a step
-that has been renamed out of `NODES` fails with the name it can no longer find.
+`constants.ts`. `docs/img/extents.svg` is drawn by _running_ the cache against a
+recording `fetch`, so its range headers show what those reads did.
+`test/diagrams.test.ts` regenerates both and compares, and a step that has been
+renamed out of `NODES` fails with the name it can no longer find.
 
 `docs/img/dataflow.svg` is the exception, hand-drawn from `dataflow.dot` and
 committed since GitHub does not render DOT:

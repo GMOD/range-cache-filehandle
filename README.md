@@ -3,8 +3,8 @@
 [![NPM version](https://img.shields.io/npm/v/@gmod/range-cache-filehandle.svg?style=flat-square)](https://npmjs.org/package/@gmod/range-cache-filehandle)
 ![Build Status](https://img.shields.io/github/actions/workflow/status/GMOD/range-cache-filehandle/publish.yml?branch=main)
 
-A `GenericFilehandle` that caches byte ranges in chunks and coalesces adjacent
-reads into one request.
+A `GenericFilehandle` that caches the byte ranges it fetched and coalesces
+nearby reads into one request.
 
 An indexed genomics parser makes many small, adjacent, semi-random reads, most
 near ones it just made. This layer sits under the parser, turns those reads into
@@ -29,7 +29,7 @@ const cram = new CramFile({
 ```
 
 `CachedFilehandle` wraps a local file or `Blob` instead. Its second argument
-keys this file's chunks in the shared cache, so it must identify the underlying
+keys this file's bytes in the shared cache, so it must identify the underlying
 bytes:
 
 ```js
@@ -41,23 +41,26 @@ const file = new CachedFilehandle(new LocalFile(path), `file://${path}`)
 
 ## Behavior
 
-<img src="docs/img/chunks.svg" alt="A read spanning five 256 KiB chunks: one is cached, one is already being fetched by another read, and the three that are missing become two range requests" width="660">
+<img src="docs/img/extents.svg" alt="Two reads issued in one turn: one is partly cached and partly in flight, and their four gaps become three range requests" width="860">
 
-- Serves reads from a 256 KiB chunk grid. The chunks a read is missing are
-  grouped into contiguous runs, one request each.
-- Joins a chunk another read has in flight rather than requesting it again.
-- Reference-counts each run's readers, so a shared request is cancelled only
+- Stores exactly the byte extents it fetched, per file, and fetches only the
+  gaps a read leaves.
+- Plans every read issued in the same microtask turn together. A gap under 64
+  KiB grows to 64 KiB, and gaps within 64 KiB of each other share a request.
+- Joins a request another read has in flight rather than asking again.
+- Reference-counts each request's readers, so a shared request is cancelled only
   once all of them abort. A reader passing no signal pins it for everyone.
-- Holds 1000 chunks (256 MB) per worker and sweeps chunks idle for 15 minutes.
-  `clearCache()` drops everything, `clearCacheFor(key)` drops one file, and
-  `sweepIdleCache()` reclaims early. `setChunkCacheLimit(bytes)` changes the cap
-  and `cachedBytes()` reports what the cache holds.
+- Holds 256 MiB per worker, evicting the least recently used 1 MiB piece, and
+  sweeps bytes idle for 15 minutes. `clearCache()` drops everything,
+  `clearCacheFor(key)` drops one file, `sweepIdleCache()` reclaims early,
+  `setCacheLimit(bytes)` changes the cap and `cachedBytes()` reports what the
+  cache holds.
 - Runs 20 requests at a time **per origin**.
-- Clamps reads past EOF once a size is known, from `Content-Range`, a 416, or
-  `stat()`.
-- Checks a `206` against its `Content-Range` and the range requested, so a
-  truncated body or a proxy answering with the wrong range throws an error
-  instead of being cached as a file that ends early.
+- Learns a file's size from `Content-Range`, a 416, a body shorter than its
+  request, or `stat()`, and clamps reads past it.
+- Needs a server that supports range requests. A `200` to a range request is an
+  error, and a `206` whose `Content-Range` is not the range asked for throws
+  instead of being cached.
 - Names a cause on failure: CORS, mixed content, a server ignoring the Range
   header, a connection that goes 30s without answering.
 
@@ -69,10 +72,21 @@ passed it; the cache passes the signal through to the socket.
 
 ## Tuning
 
-`CHUNK_SIZE`, `MAX_CACHE_ENTRIES`, `CACHE_IDLE_TIMEOUT_MS`, `MAX_CONCURRENT` and
-`RESPONSE_TIMEOUT_MS` are exported for reading, not setting, because the cache
-is module-global. [docs/tuning.md](docs/tuning.md) gives the measurements behind
-each.
+`MIN_REQUEST`, `PIECE_SIZE`, `CACHE_LIMIT`, `CACHE_IDLE_TIMEOUT_MS`,
+`MAX_CONCURRENT` and `RESPONSE_TIMEOUT_MS` are exported for reading, not
+setting, because the cache is module-global. [docs/tuning.md](docs/tuning.md)
+gives the measurements behind each.
+
+## Upgrading from 1.x
+
+- `setChunkCacheLimit(bytes)` is `setCacheLimit(bytes)`, and the limit is exact
+  bytes rather than whole 256 KiB chunks.
+- `CHUNK_SIZE` and `MAX_CACHE_ENTRIES` are gone; `MIN_REQUEST`, `PIECE_SIZE` and
+  `CACHE_LIMIT` replace them.
+- A `200` to a range request is an error even when the request started at byte
+  0, and a 416 with no readable length bounds the file at the start of its
+  range. Both assume a server that supports ranges.
+- A request goes out one microtask after the read that needs it.
 
 ## Docs
 
@@ -120,8 +134,8 @@ that cache means the read never reaches this layer:
   without depending on `@jbrowse/core`.
 - Replaces [http-range-fetcher](https://github.com/rbuels/http-range-fetcher),
   which merges the requests made in the last 100 ms. This package merges the
-  chunks a read is missing, so it needs no window to wait out, and it passes an
-  `AbortSignal` through to the socket.
+  gaps of reads issued in one microtask turn, so it waits out no timer, and it
+  passes an `AbortSignal` through to the socket.
 
 ## License
 

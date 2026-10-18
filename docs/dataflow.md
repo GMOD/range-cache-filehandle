@@ -6,11 +6,10 @@
 [CONTRIBUTING.md](../CONTRIBUTING.md) for how to re-render it.
 
 A read arrives as `(length, position)`, such as a parser asking for the bytes of
-a BAM index bin or a BGZF block. The cache rounds the range out to a 256 KiB
-grid and resolves each chunk of the grid separately, and it requests only the
-chunks that no earlier read has fetched or is fetching. A query's many small,
-adjacent, semi-random reads therefore become a few large requests, and a second
-query over the same region makes none.
+a BAM index bin or a BGZF block. Per file, the cache holds the byte extents
+earlier reads fetched and the requests still in flight. A read takes what those
+cover and fetches only its gaps, so a query's many small, adjacent reads become
+a few requests, and a second query over the same region makes none.
 
 ## Clamping
 
@@ -20,70 +19,68 @@ when the size is known.
 `@gmod/bam` and `@gmod/tabix` depend on clamping. They compute the end of their
 last read as `maxv.blockPosition + (1 << 16)` so the final BGZF block is read
 whole, which by construction runs past EOF on the last block of every file.
-Unclamped, that tail asks for chunks that start past the end of the file, and
-the server answers 416.
+Unclamped, that tail would ask for bytes past the end of the file.
 
-The size cache takes the size from whichever of three sources answers first: a
-`Content-Range` header on a 206, a `Content-Range` on a 416, or a `stat()`. The
-size cache is keyed like the chunk cache rather than held on the filehandle,
-because otherwise a new instance whose reads hit chunks an earlier instance
-fetched would have no size to clamp against. `CachedFilehandle.stat()` records
-the size it gets from the local file or Blob for the same reason.
+The size only ever shrinks. Each source is an upper bound on where the file
+ends, and the cache keeps the smallest:
 
-A read that begins at or past the end has nothing left after the cut, and
-returns empty without planning anything. The code checks for this case
-explicitly, because the clamp moves the end and leaves the start where it was.
-When the file size is not on a chunk boundary, a start past the end can fall in
-the file's last chunk, the same chunk as the clamped end, and planning would
-fetch that chunk to copy none of it.
+- the total in a `Content-Range` header;
+- the start of a range that drew a 416;
+- the end of a body shorter than its request, since a server supporting ranges
+  clamps a range to the file;
+- `stat()`, or a subclass calling `recordSize`.
 
-When no size is known at all, as with a cross-origin server that does not expose
-`Content-Range`, planning stops at a cached chunk shorter than 256 KiB, because
-a short chunk marks where the file ended.
+The size cache is keyed like the extents rather than held on the filehandle, so
+a new instance whose reads hit bytes an earlier instance fetched still has a
+size to clamp against. A file that grew needs `clearCacheFor`.
+
+A read that begins at or past the end returns empty without planning anything.
 
 ## Planning
 
-Planning sorts each chunk index in the range into one of three cases. It runs as
-a single synchronous pass with no `await` in it, so two reads arriving in the
-same tick cannot both open a request for the same chunk.
+A read whose range is wholly covered, by cached extents or by requests in
+flight, is served at once: it holds the extents, joins the requests, and never
+waits for a turn. [sharing.md](sharing.md) covers joining.
 
-- **Cached.** Serve the bytes, and move the entry to the end of the map's
-  iteration order. Eviction takes from the front, so the move makes the cache an
-  LRU rather than a FIFO by first fetch.
-- **In flight.** Await the promise another read already has for it, and register
-  this reader's interest in the run that promise belongs to.
-  [sharing.md](sharing.md) describes that mechanism.
-- **Missing.** Extend the current run of contiguous missing chunks, or open a
-  new one.
+A read with gaps waits one microtask, so every read issued in the same turn
+plans together: the reads a parser issues without awaiting between them land in
+one turn. The flush runs with no `await` in it:
 
-The cache fetches each run with one range request covering every chunk in the
-run. A single 4 kb viewport over a 2000x BAM came to 6.5 MiB in one request this
-way.
+1. Each read's gaps are what neither the cache, a request in flight, nor an
+   earlier read of this turn covers.
+2. A gap shorter than `MIN_REQUEST` (64 KiB) grows forward to it, over uncovered
+   bytes only and never past a known size. The growth is the readahead: a parser
+   that just read a block usually reads the next one soon.
+3. The turn's gaps are sorted, and any two within `MIN_REQUEST` of each other
+   become one request, re-fetching the cached bytes between them if there are
+   any. One round trip costs more than 64 KiB on any link worth designing for.
 
 ## Fetching
 
-Each run goes through `limitConcurrency`, which allows at most 20 requests in
-flight for any one origin and queues the rest, and then to the underlying
+Each request goes through `limitConcurrency`, which allows at most 20 requests
+in flight for any one origin and queues the rest, and then to the underlying
 source. That step is the only part of this package that depends on the kind of
 source. `RemoteFileWithRangeCache` sets a range header and calls `fetch`;
 `CachedFilehandle` calls `read` on whatever it wraps.
 
-The cache slices the response into chunk-sized pieces with `slice`, not
-`subarray`. A view would keep the whole 6.5 MiB run buffer alive for as long as
-any one of its chunks stayed cached, so evicting a chunk would free nothing and
-`MAX_CACHE_ENTRIES` would bound nothing. Because each chunk is a copy, the entry
-count bounds memory. A run that crossed EOF comes back short, and the cache
-stores the short chunk as-is so a later read finds the EOF marker instead of
-asking again.
+When the body lands, the cache stores the parts no other request stored first,
+in pieces of at most `PIECE_SIZE` (1 MiB), each a copy rather than a view. A
+view would keep the whole body alive for as long as any one piece stayed cached,
+so evicting it would free nothing. Pieces sit on one LRU list across every file,
+and the cache evicts from its old end whenever it holds more than `CACHE_LIMIT`.
 
 ## Assembling
 
-The read copies every chunk it uses into the result buffer at an offset computed
-from absolute file positions, so a short chunk cannot shift the position of
-later chunks. The read takes references to those chunks before its first
-`await`, so a concurrent read's eviction cannot affect it.
+The read copies every extent and body it planned from into the result buffer at
+offsets computed from absolute file positions. It takes references to the
+extents before its first `await`, so a concurrent read's eviction cannot affect
+it. A body shorter than its request marks the end of the file, and the result
+stops there.
 
-A read waits for its chunks and its own signal at once. Cancellation is per
+A read whose one request covers exactly its range, and which no other read
+joined, gets that body itself with no copy.
+
+A read waits for its requests and its own signal at once. Cancellation is per
 reader even though the fetch is shared, so a reader that aborts rejects at once
 with its own reason, while the request continues for the other readers.
 
@@ -101,7 +98,7 @@ straight through, because a `Request` has no stable cache key: `String(request)`
 is `[object Request]` for every request there is.
 
 Whole-file `readFile` skips the cache in both classes. The read is one pass over
-bytes the caller is about to hold in full anyway, so chunking it would double
+bytes the caller is about to hold in full anyway, so caching it would double
 peak memory with no reuse.
 
 ## Retries and progress
