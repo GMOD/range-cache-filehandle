@@ -1,3 +1,4 @@
+import { RemoteFileWithRangeCache } from './RemoteFileWithRangeCache.ts'
 import { getCachedRange, recordSize } from './extentCache.ts'
 import { assertReadArgs } from './util.ts'
 
@@ -42,6 +43,16 @@ export class CachedFilehandle implements GenericFilehandle {
   }
 
   constructor(inner: GenericFilehandle, key: string) {
+    // the inner read would plan against the request the outer one is waiting
+    // on it to answer, and wait on itself
+    if (
+      (inner instanceof CachedFilehandle && inner.key === key) ||
+      (inner instanceof RemoteFileWithRangeCache && inner.source === key)
+    ) {
+      throw new TypeError(
+        `CachedFilehandle cannot wrap a handle that caches under the same key, ${key}`,
+      )
+    }
     this.inner = inner
     this.key = key
   }

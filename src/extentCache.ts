@@ -64,6 +64,8 @@ interface Pending extends Span {
   stale: boolean
   /** how many reads joined it, over its whole life */
   readers: number
+  /** set when the body lands: see {@link FetchedRange.owned} */
+  owned: boolean
 }
 
 /** a read waiting for its turn's flush to plan it */
@@ -114,6 +116,8 @@ interface Pool {
 export interface FetchedRange {
   bytes: Uint8Array<ArrayBuffer>
   total?: number
+  /** nothing else holds `bytes`, so a caller may be handed them as they are */
+  owned?: boolean
 }
 
 /**
@@ -143,12 +147,20 @@ let newest: Extent | undefined
 let held = 0
 let limit = CACHE_LIMIT
 /**
+ * A file's size, or only an upper bound on it when `exact` is false.
+ */
+interface KnownSize {
+  size: number
+  exact: boolean
+}
+
+/**
  * File size, keyed like `files`. Per-instance state cannot be used: a cache hit
  * serving bytes from a previous instance's fetch would otherwise leave a new
  * instance's `stat()` with no Content-Range observation, returning a bogus size
  * of 0.
  */
-let sizeCache = new Map<string, number>()
+let sizeCache = new Map<string, KnownSize>()
 /** one {@link Pool} per origin (per key for a non-http URL), created on demand and dropped when it empties */
 const pools = new Map<string, Pool>()
 /** size probes in flight, one per key; see {@link probeSize} */
@@ -167,6 +179,38 @@ function fileFor(key: string) {
   return file
 }
 
+/** add `span` to sorted, disjoint `spans`, merging what it overlaps or touches */
+function addSpan(spans: Span[], { start, end }: Span) {
+  const first = firstEndingAfter(spans, start - 1)
+  let last = first
+  let merged = { start, end }
+  while (last < spans.length && spans[last]!.start <= end) {
+    merged = {
+      start: Math.min(merged.start, spans[last]!.start),
+      end: Math.max(merged.end, spans[last]!.end),
+    }
+    last++
+  }
+  spans.splice(first, last - first, merged)
+}
+
+/** the spans of sorted, disjoint `spans` that overlap `[start, end)` */
+function overlapping<T extends Span>(
+  spans: readonly T[],
+  start: number,
+  end: number,
+) {
+  const found: T[] = []
+  for (
+    let i = firstEndingAfter(spans, start);
+    i < spans.length && spans[i]!.start < end;
+    i++
+  ) {
+    found.push(spans[i]!)
+  }
+  return found
+}
+
 /** forget a file once it holds nothing, so a rotating key cannot accumulate */
 function release(file: FileState) {
   if (
@@ -179,13 +223,13 @@ function release(file: FileState) {
   }
 }
 
-/** index of the first extent ending after `at`; the extents are sorted and disjoint, so they are sorted by end too */
-function firstEndingAfter(extents: Extent[], at: number) {
+/** index of the first span ending after `at`, in spans sorted and disjoint, and so sorted by end too */
+function firstEndingAfter(spans: readonly Span[], at: number) {
   let lo = 0
-  let hi = extents.length
+  let hi = spans.length
   while (lo < hi) {
     const mid = (lo + hi) >>> 1
-    if (extents[mid]!.end <= at) {
+    if (spans[mid]!.end <= at) {
       lo = mid + 1
     } else {
       hi = mid
@@ -264,7 +308,8 @@ function insert(file: FileState, start: number, body: Uint8Array) {
         file,
         start: a,
         end: b,
-        bytes: body.slice(a - start, b - start),
+        // not `body.slice`, which is a view on a node Buffer
+        bytes: new Uint8Array(body.subarray(a - start, b - start)),
         lastTouched: now,
         older: undefined,
         newer: undefined,
@@ -395,7 +440,7 @@ export function clearCache() {
     forget(file)
   }
   files = new Map<string, FileState>()
-  sizeCache = new Map<string, number>()
+  sizeCache = new Map<string, KnownSize>()
   markStale(probes.values())
   probes = new Map<string, SizeProbe>()
 }
@@ -600,7 +645,7 @@ export async function probeSize(
   key: string,
   fetchSize: () => Promise<number | undefined>,
 ) {
-  const known = getSize(key)
+  const known = getExactSize(key)
   if (known !== undefined) {
     return known
   }
@@ -625,7 +670,7 @@ export async function probeSize(
     probe = started
   }
   const size = await probe.size
-  return getSize(key) ?? size
+  return getExactSize(key) ?? size
 }
 
 // ---------------------------------------------------------------------------
@@ -633,31 +678,45 @@ export async function probeSize(
 // ---------------------------------------------------------------------------
 
 /**
- * Learn a file's size, from wherever it was observed: a `Content-Range`
- * total, a 416, a body that came back short, a `stat` the underlying source
+ * Learn a file's size from a source that states it: a `Content-Range` total, a
+ * body that came back shorter than its request, a `stat` the underlying source
  * answers directly, or one a subclass gets from a metadata endpoint.
  *
- * One monotone rule: the size only ever shrinks. Every source is an upper
- * bound on where the file ends — a 416 says nothing exists at its start, a
- * short body says nothing exists past its end — so the smallest is the truth,
- * and no source can undo what another learned. A file that grew needs
- * {@link clearCacheFor}.
+ * The latest statement wins. For a file that has not changed every source
+ * agrees, and for one rewritten in place the newest is the truth: a `stat` after
+ * the rewrite has to lift a size an earlier short body recorded, or every read
+ * past the old end returns empty for the life of the process.
  *
- * The one door into the size cache, and so where finiteness is checked. A
- * non-finite size does not fail, it *poisons*: `Math.min(start + length, NaN)`
- * is NaN, so every later read of that file returns empty with nothing said. A
- * metadata endpoint that populates `size` only for files that have one — not
- * for folders, shortcuts or native editor documents — makes `Number(undefined)`
- * a reachable input rather than a hypothetical.
+ * The one door into the size cache besides {@link recordBound}, and so where
+ * finiteness is checked. A non-finite size does not fail, it *poisons*:
+ * `Math.min(start + length, NaN)` is NaN, so every later read of that file
+ * returns empty with nothing said. A metadata endpoint that populates `size`
+ * only for files that have one — not for folders, shortcuts or native editor
+ * documents — makes `Number(undefined)` a reachable input rather than a
+ * hypothetical.
  */
 export function recordSize(key: string, size: number) {
-  if (!Number.isFinite(size)) {
-    return
+  if (Number.isFinite(size)) {
+    putSize(key, { size, exact: true })
   }
+}
+
+/**
+ * Learn that a file ends at or before `bound`, as a 416 with no readable length
+ * says of the start of its range. Clamps reads, but `stat` does not answer
+ * with it, since it is not the size.
+ */
+function recordBound(key: string, bound: number) {
   const known = sizeCache.get(key)
+  if (known === undefined || bound < known.size) {
+    putSize(key, { size: bound, exact: false })
+  }
+}
+
+function putSize(key: string, size: KnownSize) {
   sizeCache.delete(key)
   evictOldest(sizeCache, MAX_SIZE_ENTRIES)
-  sizeCache.set(key, known === undefined ? size : Math.min(known, size))
+  sizeCache.set(key, size)
 }
 
 /** drop the least recently used entry of `map` while it is at or over `max` */
@@ -683,12 +742,17 @@ export function hasSize(key: string) {
  * the EOF clamp `getCachedRange` depends on.
  */
 export function getSize(key: string) {
-  const size = sizeCache.get(key)
-  if (size !== undefined) {
+  const known = sizeCache.get(key)
+  if (known !== undefined) {
     sizeCache.delete(key)
-    sizeCache.set(key, size)
+    sizeCache.set(key, known)
   }
-  return size
+  return known?.size
+}
+
+function getExactSize(key: string) {
+  const known = sizeCache.get(key)
+  return known?.exact ? getSize(key) : undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -729,14 +793,19 @@ function dispatch(
     settled: false,
     stale,
     readers: 0,
-    body: fetched.then(({ bytes, total }) => {
+    owned: false,
+    body: fetched.then(({ bytes, total, owned }) => {
+      pending.owned = owned === true
       if (!pending.stale) {
         if (total !== undefined) {
           recordSize(file.key, total)
         }
         // a short body means the file ends there: only range-supporting
-        // servers are served, and they clamp a range to the file
-        if (bytes.length < end - start) {
+        // servers are served, and they clamp a range to the file. An empty
+        // one is a 416, which says only that the file ends before `start`
+        if (bytes.length === 0) {
+          recordBound(file.key, start)
+        } else if (bytes.length < end - start) {
           recordSize(file.key, start + bytes.length)
         }
         insert(file, start, bytes)
@@ -770,20 +839,16 @@ function dispatch(
  * read makes that request uncancellable for everyone sharing it.
  */
 function join(pending: Pending, signal: AbortSignal | undefined) {
+  // A reader that has already given up is not a waiter: an `abort` listener
+  // never fires on a signal that aborted before it was added, so counting it
+  // would leave the request uncancellable for everyone sharing it. Nor may it
+  // cancel the request, which readers later in its turn have yet to join.
+  if (signal?.aborted) {
+    return
+  }
   pending.readers++
   if (!signal) {
     pending.pinned = true
-  } else if (signal.aborted) {
-    // A reader that has already given up is not a waiter, and must not be
-    // counted as one: an `abort` listener never fires on a signal that aborted
-    // before it was added, so nothing would ever take this signal back out of
-    // the set. The count would never reach zero and the request would be
-    // uncancellable for everyone sharing it, silently.
-    //
-    // `getCachedRange` rejects such a reader before it gets here, so this is
-    // the belt to that braces — the invariant is too quiet to fail to be left
-    // resting on a check several frames away.
-    abortIfUnwanted(pending, signal.reason)
   } else if (!pending.signals.has(signal)) {
     // guarded so one signal joining twice does not add two listeners
     pending.signals.add(signal)
@@ -818,7 +883,8 @@ interface Coverage {
 
 /**
  * What covers `[start, end)` — cached extents, requests in flight, and gaps
- * earlier reads of the same turn have already planned — and the gaps left.
+ * earlier reads of the same turn have already planned, as sorted disjoint
+ * spans — and the gaps left.
  *
  * A request whose readers have all given up is not cover. Its request was
  * cancelled, but the rejection takes a tick to arrive and the entry leaves the
@@ -834,21 +900,14 @@ function coverage(
   end: number,
   planned: Span[],
 ): Coverage {
-  const extents: Extent[] = []
-  for (
-    let i = firstEndingAfter(file.extents, start);
-    i < file.extents.length && file.extents[i]!.start < end;
-    i++
-  ) {
-    extents.push(file.extents[i]!)
-  }
+  const extents = overlapping(file.extents, start, end)
   const pending = file.pending.filter(
     p => p.start < end && p.end > start && !p.controller.signal.aborted,
   )
   const covers: Span[] = [
     ...extents,
     ...pending,
-    ...planned.filter(p => p.start < end && p.end > start),
+    ...overlapping(planned, start, end),
   ].sort((a, b) => a.start - b.start)
   const gaps: Span[] = []
   let cursor = start
@@ -898,18 +957,30 @@ function flush(file: FileState, turn: Turn) {
   const now = Date.now()
   const size = getSize(file.key)
   const planned: Gap[] = []
+  const plannedCover: Span[] = []
   const plans: { reader: Reader; plan: Plan }[] = []
   for (const reader of turn.readers) {
     const end = size === undefined ? reader.end : Math.min(reader.end, size)
     const plan: Plan = { start: reader.start, end, extents: [], pending: [] }
     if (reader.start < end && !reader.signal?.aborted) {
-      const found = coverage(file, reader.start, end, planned)
+      const found = coverage(file, reader.start, end, plannedCover)
       plan.extents = found.extents
       plan.pending = found.pending
       for (const extent of found.extents) {
         touch(extent, now)
       }
       for (const gap of found.gaps) {
+        // With no size known, a request in flight may be the one to find EOF,
+        // and a gap starting where it ends may start past EOF, which a server
+        // whose CORS headers skip a 416 turns into a network error. The rest
+        // of this read waits for that request and plans again.
+        if (
+          size === undefined &&
+          found.pending.some(p => p.end === gap.start)
+        ) {
+          plan.end = gap.start
+          break
+        }
         if (gap.end - gap.start < MIN_REQUEST) {
           const want =
             size === undefined
@@ -918,17 +989,19 @@ function flush(file: FileState, turn: Turn) {
           gap.end = Math.max(gap.end, Math.min(want, nextCover(file, gap.end)))
         }
         planned.push({ ...gap, doFetch: reader.doFetch })
+        addSpan(plannedCover, gap)
       }
     }
     plans.push({ reader, plan })
   }
   const requests = merge(planned).map(gap => dispatch(file, gap, turn.stale))
   for (const { reader, plan } of plans) {
-    for (const request of requests) {
-      if (request.start < plan.end && request.end > plan.start) {
-        plan.pending.push(request)
-      }
+    // planned nothing, and must not touch the requests the others planned
+    if (reader.signal?.aborted) {
+      reader.settle(plan)
+      continue
     }
+    plan.pending.push(...overlapping(requests, plan.start, plan.end))
     for (const pending of plan.pending) {
       join(pending, reader.signal)
     }
@@ -937,7 +1010,10 @@ function flush(file: FileState, turn: Turn) {
   release(file)
 }
 
-/** one request for every cluster of gaps within {@link MIN_REQUEST} of each other */
+/**
+ * One request for every cluster of gaps within {@link MIN_REQUEST} of each
+ * other, sorted and disjoint.
+ */
 function merge(gaps: Gap[]) {
   gaps.sort((a, b) => a.start - b.start)
   const requests: Gap[] = []
@@ -1024,6 +1100,7 @@ function assemble(
     const request = pending[0]!
     const body = bodies[0]!
     if (
+      request.owned &&
       request.readers === 1 &&
       request.start === start &&
       body.length === length &&
@@ -1095,7 +1172,21 @@ export async function getCachedRange(
       signal?.throwIfAborted()
     }
   }
-  return assemble(plan, bodies)
+  const head = assemble(plan, bodies)
+  if (plan.end === end || head.length < plan.end - start) {
+    return head
+  }
+  const tail = await getCachedRange(
+    key,
+    plan.end,
+    end - plan.end,
+    signal,
+    doFetch,
+  )
+  const result = new Uint8Array(head.length + tail.length)
+  result.set(head)
+  result.set(tail, head.length)
+  return result
 }
 
 /**

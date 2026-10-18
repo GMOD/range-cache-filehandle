@@ -21,18 +21,25 @@ last read as `maxv.blockPosition + (1 << 16)` so the final BGZF block is read
 whole, which by construction runs past EOF on the last block of every file.
 Unclamped, that tail would ask for bytes past the end of the file.
 
-The size only ever shrinks. Each source is an upper bound on where the file
-ends, and the cache keeps the smallest:
+Four sources state the size, and the latest statement wins:
 
 - the total in a `Content-Range` header;
-- the start of a range that drew a 416;
 - the end of a body shorter than its request, since a server supporting ranges
   clamps a range to the file;
-- `stat()`, or a subclass calling `recordSize`.
+- `stat()`;
+- a subclass calling `recordSize`.
+
+For a file that has not changed they all agree. For one rewritten in place the
+newest is the truth, so a `stat()` after the rewrite lifts a size an earlier
+short body recorded.
+
+A 416 with no readable length states nothing: it only says the file ends at or
+before the start of the range. That bound clamps reads, but `stat()` does not
+answer with it.
 
 The size cache is keyed like the extents rather than held on the filehandle, so
 a new instance whose reads hit bytes an earlier instance fetched still has a
-size to clamp against. A file that grew needs `clearCacheFor`.
+size to clamp against.
 
 A read that begins at or past the end returns empty without planning anything.
 
@@ -51,7 +58,11 @@ one turn. The flush runs with no `await` in it:
 2. A gap shorter than `MIN_REQUEST` (64 KiB) grows forward to it, over uncovered
    bytes only and never past a known size. The growth is the readahead: a parser
    that just read a block usually reads the next one soon.
-3. The turn's gaps are sorted, and any two within `MIN_REQUEST` of each other
+3. While the size is unknown, a gap that starts where a request in flight ends
+   waits for that request, which may find the end of the file there. Without the
+   wait the gap's request could start past EOF, and a server whose CORS headers
+   skip a 416 turns that into a network error.
+4. The turn's gaps are sorted, and any two within `MIN_REQUEST` of each other
    become one request, re-fetching the cached bytes between them if there are
    any. One round trip costs more than 64 KiB on any link worth designing for.
 
@@ -77,8 +88,10 @@ extents before its first `await`, so a concurrent read's eviction cannot affect
 it. A body shorter than its request marks the end of the file, and the result
 stops there.
 
-A read whose one request covers exactly its range, and which no other read
-joined, gets that body itself with no copy.
+A `RemoteFileWithRangeCache` read whose one request covers exactly its range,
+and which no other read joined, gets that body itself with no copy. A
+`CachedFilehandle` read always gets a copy, since its inner handle may still
+hold the bytes it returned.
 
 A read waits for its requests and its own signal at once. Cancellation is per
 reader even though the fetch is shared, so a reader that aborts rejects at once

@@ -701,16 +701,14 @@ describe('read arguments that would become a wrong request', () => {
     }).toThrow(/NaN length or position/)
   })
 
-  test('a Range header longer than the file is served to its end', async () => {
-    // planning costs the same for any length, so a huge one is one request
+  test('a Range header asking for more than a read may is refused', async () => {
     const log: { start: number; end: number }[] = []
     const url = nextUrl()
     const file = makeFile(url, goodServer(log))
-    const res = await file.fetch(url, {
-      headers: { range: 'bytes=0-99999999999999' },
-    })
-    expect((await res.arrayBuffer()).byteLength).toBe(FILE_SIZE)
-    expect(log).toHaveLength(1)
+    await expect(
+      file.fetch(url, { headers: { range: 'bytes=0-99999999999999' } }),
+    ).rejects.toThrow(/more than the .* a Uint8Array can hold/)
+    expect(log).toEqual([])
   })
 
   test('a negative position never reaches the network', async () => {
@@ -1193,5 +1191,102 @@ describe('a read that starts past the end of the file', () => {
     const file = makeFile(nextUrl(), raggedServer(log))
     await file.stat()
     expect(await file.read(5000, RAGGED - 100)).toHaveLength(100)
+  })
+})
+
+describe('a size nobody has stated', () => {
+  // no Content-Range, and a 404 past EOF, as JBrowse's test server answers: a
+  // request starting past the end fails the read rather than reading as EOF
+  function strictServer(size: number, log: { start: number; end: number }[]) {
+    const gates: (() => void)[] = []
+    const fetchImpl = async (_url: unknown, init?: RequestInit) => {
+      const { start, end } = requestedRange(init)
+      log.push({ start, end })
+      await new Promise<void>(resolve => gates.push(resolve))
+      return start >= size
+        ? new Response('', { status: 404 })
+        : new Response(fileData.slice(start, Math.min(end + 1, size)), {
+            status: 206,
+          })
+    }
+    return {
+      fetchImpl,
+      release: () => {
+        for (const gate of gates.splice(0)) {
+          gate()
+        }
+      },
+    }
+  }
+
+  test('a gap where a request in flight ends waits for it to find EOF', async () => {
+    const size = 1_000_000
+    const log: { start: number; end: number }[] = []
+    const { fetchImpl, release } = strictServer(size, log)
+    const file = makeFile(nextUrl(), fetchImpl)
+    // two bgzf tail over-reads, planned in different turns
+    const first = file.read(65_536, size - 2000)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const second = file.read(95_536, size - 1500)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    release()
+    expect(await first).toEqual(fileData.slice(size - 2000, size))
+    expect(await second).toEqual(fileData.slice(size - 1500, size))
+    expect(log.every(({ start }) => start < size)).toBe(true)
+  })
+
+  test('and a gap past one that does not end the file is then fetched', async () => {
+    const size = 1_000_000
+    const log: { start: number; end: number }[] = []
+    const { fetchImpl, release } = strictServer(size, log)
+    const file = makeFile(nextUrl(), fetchImpl)
+    const first = file.read(1000, 0)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const second = file.read(200_000, 500)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    release()
+    await first
+    const reading = second.then(bytes => bytes)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    release()
+    expect(await reading).toEqual(fileData.slice(500, 200_500))
+  })
+
+  test('stat does not answer with a bound a bare 416 implied', async () => {
+    const size = 300_000
+    const file = makeFile(
+      nextUrl(),
+      async (_url: unknown, init?: RequestInit) => {
+        const { start, end } = requestedRange(init)
+        return start >= size
+          ? new Response('', { status: 416 })
+          : new Response(fileData.slice(start, Math.min(end + 1, size)), {
+              status: 206,
+            })
+      },
+    )
+    expect(await file.read(100, size + 5000)).toHaveLength(0)
+    await expect(file.stat()).rejects.toThrow(/Could not determine size/)
+  })
+})
+
+describe('a file rewritten larger', () => {
+  test('a stat after the rewrite lifts the size a short body recorded', async () => {
+    let size = 200_000
+    const inner = {
+      read: async (length: number, position: number) =>
+        fileData.slice(position, Math.min(position + length, size)),
+      readFile: async () => fileData.slice(0, size),
+      stat: async () => ({ size, mtimeMs: size }),
+      close: async () => {},
+    } as unknown as GenericFilehandle
+    const before = new CachedFilehandle(inner, 'file:///grows.bin')
+    expect(await before.read(1000, 199_500)).toHaveLength(500)
+    size = 400_000
+    const after = new CachedFilehandle(inner, 'file:///grows.bin')
+    expect(await after.stat()).toEqual({ size, mtimeMs: size })
+    expect(await after.read(1000, 300_000)).toEqual(
+      fileData.slice(300_000, 301_000),
+    )
   })
 })

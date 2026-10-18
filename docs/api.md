@@ -120,6 +120,10 @@ name, and something unique to the instance for a `Blob`, which has no name. Two
 wrappers with the same key share bytes, which is right for two handles on one
 path and wrong for two unrelated blobs.
 
+The constructor throws a `TypeError` when `inner` is itself a `CachedFilehandle`
+or `RemoteFileWithRangeCache` caching under `key`, because the inner read would
+wait on the request the outer one is waiting on it to answer.
+
 `read` and `stat` go through the cache, while `readFile`, `close` and `source`
 pass straight to the inner handle. `CachedFilehandle` records a size from `stat`
 so past-EOF reads clamp, except a size of 0 from stats without `mtimeMs`. A

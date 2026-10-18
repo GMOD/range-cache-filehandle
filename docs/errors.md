@@ -109,8 +109,9 @@ total. A caller that can degrade gracefully should wrap `stat()` in a
 
 ## Checking a range response
 
-A file's size only ever shrinks, so a wrong bound would hold for the URL until
-`clearCacheFor`. The cache checks every 206 before it learns anything from it:
+A size a response states clamps every later read of the URL, so a wrong one
+returns short reads with no error. The cache checks every 206 before it learns
+anything from it:
 
 - The `Content-Range` describes a real range of a file that size, starting where
   the request did.

@@ -133,7 +133,8 @@ needs the separation can state it.
 
 A path identifies a location, and the bytes there can change. Rewrite a file in
 place and a new `CachedFilehandle` on the same `file://` key reads the old
-file's cached bytes, and the old file's size clamps every read. The cache does
-not stat the file to notice, because that would cost every handle a round trip
-before its first read. A caller that rewrites files either puts the modification
-time in the key or calls `clearCacheFor(key)` before reopening.
+file's cached bytes. A `stat()` of the new file replaces the old size, but
+nothing replaces the bytes. The cache does not stat the file to notice, because
+that would cost every handle a round trip before its first read. A caller that
+rewrites files either puts the modification time in the key or calls
+`clearCacheFor(key)` before reopening.

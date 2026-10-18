@@ -86,6 +86,7 @@ gives the measurements behind each.
 - A `200` to a range request is an error even when the request started at byte
   0, and a 416 with no readable length bounds the file at the start of its
   range. Both assume a server that supports ranges.
+- `CachedFilehandle` refuses an inner handle that caches under the same key.
 - A request goes out one microtask after the read that needs it.
 
 ## Docs

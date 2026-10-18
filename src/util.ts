@@ -142,8 +142,9 @@ export function parseByteRange(range: string | null) {
 /**
  * Refuse a read whose arguments would become a different, valid-looking
  * request: a negative position becomes a suffix range, and a fractional one
- * lands in a header the server can only reject. Both come from an index that is
- * corrupt or parsed against the wrong file.
+ * lands in a header the server can only reject, and a length past what a
+ * `Uint8Array` holds would stream the whole file before failing. All come from
+ * an index that is corrupt or parsed against the wrong file.
  */
 export function assertReadArgs(key: string, length: number, position: number) {
   if (Number.isNaN(length) || Number.isNaN(position)) {
@@ -161,7 +162,15 @@ export function assertReadArgs(key: string, length: number, position: number) {
       `read() of ${key} needs a non-negative safe-integer length and position (length=${length}, position=${position}); the index the offset came from is probably corrupt or being read against the wrong file`,
     )
   }
+  if (length > MAX_READ_LENGTH) {
+    throw new TypeError(
+      `read() of ${key} asked for ${length} bytes, more than the ${MAX_READ_LENGTH} a Uint8Array can hold; the index the offset came from is probably corrupt or being read against the wrong file`,
+    )
+  }
 }
+
+/** what a `Uint8Array` can hold, and so the largest read worth attempting */
+const MAX_READ_LENGTH = 2 ** 32 - 1
 
 /** the origin of an http(s) URL, resolved against the page; otherwise undefined */
 export function httpOrigin(url: string) {

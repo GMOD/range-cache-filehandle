@@ -156,7 +156,7 @@ export class RemoteFileWithRangeCache extends RemoteFile {
         `${url} sent ${bytes.byteLength} bytes for bytes ${range!.start}-${range!.end}, which is ${declared} bytes (the body is truncated; left alone this is indistinguishable from the file ending here and would be cached as such)`,
       )
     }
-    return { bytes, total: range?.total }
+    return { bytes, total: range?.total, owned: true }
   }
 
   /**
@@ -288,8 +288,8 @@ export class RemoteFileWithRangeCache extends RemoteFile {
  * Why a 206's `Content-Range` cannot be the answer to a request for
  * `[start, end]`, or undefined when it can.
  *
- * The size of a file only ever shrinks, so a wrong upper bound is permanent for
- * the URL. Two headers would record one: a range that contradicts its own
+ * A size a response states clamps every later read of the URL, so a wrong one
+ * returns short reads with no error. Two headers would record one: a range that contradicts its own
  * total, and a range that stops short of the request while its total says the
  * file goes on, which a short body would otherwise turn into an early EOF.
  */
