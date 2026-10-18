@@ -92,18 +92,23 @@ async function trial({
       const start = int(0, SIZE + 20_000)
       const length = rand() < 0.3 ? int(1, 2000) : int(1, 300_000)
       const controller = new AbortController()
-      const willAbort = rand() < 0.25
       const reason = new Error(`abort ${round}:${i}`)
-      if (willAbort) {
-        setTimeout(
-          () => {
-            controller.abort(reason)
-          },
-          int(0, 4),
-        )
-      }
       const signal = rand() < 0.1 ? undefined : controller.signal
-      return file.read(length, start, { signal }).then(
+      const read = file.read(length, start, { signal })
+      // in the same tick, before the turn plans, or once requests are out:
+      // a pan aborts the old blocks in the tick it asks for the new ones
+      const abort = () => {
+        controller.abort(reason)
+      }
+      const when = rand()
+      if (when < 0.1) {
+        abort()
+      } else if (when < 0.2) {
+        queueMicrotask(abort)
+      } else if (when < 0.3) {
+        setTimeout(abort, int(0, 4))
+      }
+      return read.then(
         bytes => {
           const want = data.subarray(
             Math.min(start, SIZE),
