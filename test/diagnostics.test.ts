@@ -286,7 +286,7 @@ describe('CachedFilehandle over an arbitrary filehandle', () => {
     expect(reads).toEqual([])
   })
 
-  test('reads are chunked and served from cache the second time', async () => {
+  test('reads are served from cache the second time', async () => {
     const { inner, reads, bytes } = fakeInner()
     const file = new CachedFilehandle(inner, 'cached')
     const first = await file.read(100, 10)
@@ -303,10 +303,7 @@ describe('CachedFilehandle over an arbitrary filehandle', () => {
     expect(await file.stat()).toEqual({ size: 4096 })
     const bytes = await file.read(10_000, 4000)
     expect(bytes.length).toBe(96)
-    // The clamp works in chunks, so the one request is the chunk-aligned run
-    // covering the file rather than the 14,000 bytes the read implied.
-    expect(reads).toHaveLength(1)
-    expect(reads[0]!.position).toBe(0)
+    expect(reads).toMatchObject([{ length: 96, position: 4000 }])
   })
 
   test('a read wholly past a known size never reaches the inner handle', async () => {

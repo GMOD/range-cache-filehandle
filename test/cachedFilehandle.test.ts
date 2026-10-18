@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { expectBytes } from './expectBytes.ts'
 import {
   CachedFilehandle,
+  MIN_REQUEST,
   RemoteFileWithRangeCache,
   clearCache,
 } from '../src/index.ts'
@@ -162,20 +163,21 @@ describe('CachedFilehandle wraps any filehandle', () => {
     expect([...(await file.read(100, 0))]).toEqual([...slice(0, 99)])
     expect(calls.length).toBe(1)
 
-    // a second read inside the same chunk never reaches the inner handle
+    // a second read inside what the first one fetched never reaches the inner
+    // handle
     expect([...(await file.read(50, 20))]).toEqual([...slice(20, 69)])
     expect(calls.length).toBe(1)
   })
 
-  test('reads a whole chunk from the inner handle, not just the bytes asked for', async () => {
+  test('grows a short read to MIN_REQUEST', async () => {
     const { calls, inner } = fakeInner()
     const file = new CachedFilehandle(inner, 'file:///tmp/y.bam')
     await file.read(10, 0)
-    expect(calls[0]!.length).toBe(CHUNK)
+    expect(calls[0]!.length).toBe(MIN_REQUEST)
     expect(calls[0]!.position).toBe(0)
   })
 
-  test('two wrappers on one key share chunks; different keys do not', async () => {
+  test('two wrappers on one key share bytes; different keys do not', async () => {
     const a = fakeInner()
     const b = fakeInner()
     await new CachedFilehandle(a.inner, 'file:///tmp/same.bam').read(100, 0)

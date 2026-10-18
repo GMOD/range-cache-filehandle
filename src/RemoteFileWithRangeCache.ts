@@ -93,9 +93,10 @@ export class RemoteFileWithRangeCache extends RemoteFile {
    * file's total length if the response gave it.
    *
    * Three checks, for a server that supports ranges: the status is a 206, the
-   * `Content-Range` starts where the request did, and the body is the length
-   * the header declares — or, with no readable header, no longer than the
-   * request. A body shorter than the request is the end of the file. A 200
+   * `Content-Range` is the range asked for (see {@link rangeProblem}), and the
+   * body is the length the header declares — or, with no readable header, no
+   * longer than the request. A body shorter than the request is the end of the
+   * file. A 200
    * means the server ignored the Range header, and its body starts at byte 0
    * whatever offset was asked for, so it is refused with a hint rather than
    * sliced into bytes from the wrong position.
@@ -131,11 +132,10 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       throw Object.assign(new Error(msg), { status: res.status })
     }
     const range = parseContentRange(res.headers.get('content-range'))
-    if (range?.start !== undefined && range.start !== start) {
+    const problem = rangeProblem(url, start, end, range)
+    if (problem !== undefined) {
       discardBody(res)
-      throw new Error(
-        `${url} answered bytes ${range.start}-${range.end} for a request for bytes starting at ${start} (the response does not describe the range that was asked for, so its bytes would land at the wrong offsets; a caching proxy in front of the file is the usual cause)`,
-      )
+      throw new Error(problem)
     }
     // Read no more than the header declares, so a proxy streaming the whole
     // file behind an honest header costs the request rather than the file.
@@ -282,6 +282,37 @@ export class RemoteFileWithRangeCache extends RemoteFile {
       release()
     }
   }
+}
+
+/**
+ * Why a 206's `Content-Range` cannot be the answer to a request for
+ * `[start, end]`, or undefined when it can.
+ *
+ * The size of a file only ever shrinks, so a wrong upper bound is permanent for
+ * the URL. Two headers would record one: a range that contradicts its own
+ * total, and a range that stops short of the request while its total says the
+ * file goes on, which a short body would otherwise turn into an early EOF.
+ */
+function rangeProblem(
+  url: string,
+  start: number,
+  end: number,
+  range: ReturnType<typeof parseContentRange>,
+) {
+  if (range?.start === undefined || range.end === undefined) {
+    return undefined
+  }
+  const { total } = range
+  if (range.end < range.start || (total !== undefined && range.end >= total)) {
+    return `${url} answered Content-Range "bytes ${range.start}-${range.end}/${total ?? '*'}", which does not describe a range of a file that size (the header contradicts itself, so neither the bytes it labels nor the length it reports can be trusted; a caching proxy in front of the file is the usual cause)`
+  }
+  if (range.start !== start) {
+    return `${url} answered bytes ${range.start}-${range.end} for a request for bytes starting at ${start} (the response does not describe the range that was asked for, so its bytes would land at the wrong offsets; a caching proxy in front of the file is the usual cause)`
+  }
+  if (total !== undefined && range.end < Math.min(end, total - 1)) {
+    return `${url} served bytes ${range.start}-${range.end} of a request for bytes ${start}-${end} of a ${total}-byte file (the response stops short of both the end asked for and the end of the file, so the bytes past it would be taken for EOF; a proxy capping how much of a range it will serve is the usual cause)`
+  }
+  return undefined
 }
 
 /**

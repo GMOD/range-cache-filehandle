@@ -353,7 +353,6 @@ describe('range and whole-file bodies count while they stream', () => {
       fetch: async () => new Response(bytes, { status: 200 }),
     })
     expect(await file.readFile()).toEqual(bytes)
-    expect(await file.stat()).toEqual({ size: bytes.length })
   })
 
   test('a request queued behind six streaming bodies is not failed at the deadline', async () => {

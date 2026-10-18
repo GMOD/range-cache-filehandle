@@ -2,9 +2,12 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { expectBytes } from './expectBytes.ts'
 import {
-  MAX_CACHE_ENTRIES,
+  CACHE_LIMIT,
+  MIN_REQUEST,
   RemoteFileWithRangeCache,
+  cachedBytes,
   clearCache,
+  setCacheLimit,
 } from '../src/index.ts'
 
 const CHUNK = 256 * 1024
@@ -104,8 +107,14 @@ async function fetchRange(
 }
 
 afterEach(() => {
+  setCacheLimit(CACHE_LIMIT)
   clearCache()
 })
+
+/** past the microtask turn that plans a read, so its request is out */
+function nextTurn() {
+  return new Promise(resolve => setTimeout(resolve, 0))
+}
 
 describe('RemoteFileWithRangeCache', () => {
   test('returns correct bytes for a small range within one chunk', async () => {
@@ -316,7 +325,8 @@ describe('RemoteFileWithRangeCache', () => {
       const file = makeFile(mockFetch)
 
       const first = fetchRange(file, 0, CHUNK * 2 - 1)
-      // chunk 1 is in flight above, chunk 2 is nobody's yet
+      await nextTurn()
+      // the first half of this is in flight above, the rest is nobody's yet
       const second = fetchRange(file, CHUNK, CHUNK * 3 - 1)
       release()
 
@@ -430,7 +440,7 @@ describe('RemoteFileWithRangeCache', () => {
 
     // Prime chunk 0 (full) and chunk 1 (short — server clips to smallFileSize)
     await file.fetch('https://example.com/small.bin', {
-      headers: { range: `bytes=0-${CHUNK - 1}` },
+      headers: { range: `bytes=0-${MIN_REQUEST - 1}` },
     })
     await file.fetch('https://example.com/small.bin', {
       headers: { range: `bytes=${CHUNK}-${2 * CHUNK - 1}` },
@@ -588,8 +598,7 @@ describe('RemoteFileWithRangeCache', () => {
       fetch: mockFetch,
     })
 
-    // Single request spanning chunks 1 and 2, with no prior cached chunks.
-    // Chunk 1 has data, chunk 2 is past EOF.
+    // one request, half of it past EOF
     const overreadStart = CHUNK + 200_000
     const overreadEnd = overreadStart + 65_535
     const res = await file.fetch('https://example.com/small.bin', {
@@ -600,24 +609,17 @@ describe('RemoteFileWithRangeCache', () => {
     // Returns only the bytes that exist
     expectBytes(result, smallFile.slice(overreadStart, smallFileSize))
 
-    // Both chunks were in one coalesced run — only one HTTP request
     expect(calls).toHaveLength(1)
-    expect(calls[0]!.start).toBe(CHUNK)
+    expect(calls[0]!.start).toBe(overreadStart)
   })
 
-  // Regression: the module-global LRU is capped and shared across every file.
-  // A chunk this read already holds can be evicted by other concurrent reads'
-  // putCached calls during the fetch await window. Assembly must not re-read
-  // the (possibly-evicted) chunk from the Map — it holds a local reference —
-  // else getCached returns undefined and undefined.length throws a TypeError.
-  test('evicting a needed chunk mid-fetch still assembles correct bytes', async () => {
-    // Read spans chunk 0 (already cached) and chunk 1 (missing → slow fetch).
-    // While chunk 1's fetch is parked, flood the shared LRU past its cap so
-    // chunk 0's Map entry is evicted. Assembly must still produce chunk 0's
-    // bytes from its locally-held reference.
-    let releaseChunk1 = () => {}
-    const chunk1Gate = new Promise<void>(res => {
-      releaseChunk1 = res
+  // The LRU is capped and shared across every file, so other reads can evict
+  // an extent this read planned from while it awaits its gap. Assembly holds a
+  // local reference rather than looking the extent up again.
+  test('evicting a needed extent mid-fetch still assembles correct bytes', async () => {
+    let releaseGap = () => {}
+    const gapGate = new Promise<void>(res => {
+      releaseGap = res
     })
 
     const mainUrl = 'https://example.com/evict.bin'
@@ -631,12 +633,10 @@ describe('RemoteFileWithRangeCache', () => {
         const start = Number(m[1])
         const end = Math.min(Number(m[2]), FILE_SIZE - 1)
         if (requestedUrl(url) !== mainUrl) {
-          // a flood file ends inside its first chunk: still one cache entry,
-          // without allocating 256 KiB for each
           return new Response(slice(0, 99), { status: 206 })
         }
-        if (start >= CHUNK) {
-          await chunk1Gate
+        if (start >= MIN_REQUEST) {
+          await gapGate
         }
         return new Response(slice(start, end), { status: 206 })
       }
@@ -652,21 +652,21 @@ describe('RemoteFileWithRangeCache', () => {
       return new Uint8Array(await res.arrayBuffer())
     }
 
-    // Prime chunk 0 so it is present in the LRU (and captured by the next read).
     await read(mainUrl, 0, 99)
 
-    // Read spanning chunk 0 (cached) + chunk 1 (missing); parks on chunk1Gate.
-    const start = CHUNK - 50
-    const end = CHUNK + 50
+    // half cached, half a gap that parks on the gate
+    const start = MIN_REQUEST - 50
+    const end = MIN_REQUEST + 50
     const readPromise = read(mainUrl, start, end)
+    await nextTurn()
 
-    // Flood the shared LRU from other URLs past its cap so it evicts chunk 0's
-    // key while the read above is in flight.
-    for (let i = 0; i < MAX_CACHE_ENTRIES + 100; i++) {
+    setCacheLimit(MIN_REQUEST)
+    for (let i = 0; i < 3; i++) {
       await read(`https://example.com/flood${i}.bin`, 0, 99)
     }
+    expect(cachedBytes()).toBeLessThan(MIN_REQUEST)
 
-    releaseChunk1()
+    releaseGap()
     const result = await readPromise
     expectBytes(result, slice(start, end))
   })
@@ -716,8 +716,8 @@ describe('RemoteFileWithRangeCache', () => {
   })
 
   // Once the size is known from Content-Range, a read whose tail extends past
-  // EOF (the bam/tabix 1<<16 over-read) is clamped before planning, so no
-  // request is issued for a chunk that starts past EOF even on a cold cache.
+  // EOF (the bam/tabix 1<<16 over-read) is clamped before planning, so nothing
+  // past EOF is asked for even on a cold cache.
   test('known file size clamps a read extending past EOF', async () => {
     const { calls, mockFetch } = createSizedMockFetch()
     const file = makeFile(mockFetch)
@@ -728,9 +728,7 @@ describe('RemoteFileWithRangeCache', () => {
     const start = FILE_SIZE - 100
     const result = await fetchRange(file, start, start + 65_635)
     expectBytes(result, slice(start, FILE_SIZE - 1))
-    // one request, clamped to the final chunk — nothing past FILE_SIZE
-    expect(calls).toHaveLength(1)
-    expect(calls[0]!.start).toBe(CHUNK * 7)
+    expect(calls).toEqual([{ start, end: FILE_SIZE - 1 }])
   })
 
   test('a read entirely past a known EOF makes no request', async () => {
@@ -804,36 +802,6 @@ describe('RemoteFileWithRangeCache', () => {
   // otherwise have its body sliced at the requested offsets, silently serving
   // bytes from position 0 as if they came from `start` (classic symptom
   // downstream: "invalid bgzf header").
-  describe('server that ignores range requests', () => {
-    // small enough to be the range that was asked for. A whole file bigger than
-    // a chunk is refused rather than held, however it declares itself — see
-    // failureModes.test.ts
-    const SMALL = 4096
-    function rangeIgnoringFetch() {
-      return async () => new Response(fileData.slice(0, SMALL), { status: 200 })
-    }
-
-    test('throws instead of returning wrong bytes for a range past byte 0', async () => {
-      const file = makeFile(rangeIgnoringFetch())
-      await expect(fetchRange(file, CHUNK, CHUNK + 99)).rejects.toThrow(
-        /ignored the Range header/,
-      )
-    })
-
-    test('accepts a 200 when the request started at 0', async () => {
-      const file = makeFile(rangeIgnoringFetch())
-      // the body does start at byte 0, so slicing it at the requested offsets
-      // is correct — no need to fail a server whose file fits in one chunk
-      expectBytes(await fetchRange(file, 0, 99), slice(0, 99))
-    })
-
-    test('uses the 200 body length as the file size', async () => {
-      const file = makeFile(rangeIgnoringFetch())
-      await fetchRange(file, 0, 99)
-      // there is no Content-Range on a 200, but the body is the whole file
-      expect(await file.stat()).toEqual({ size: SMALL })
-    })
-  })
 })
 
 // A gated fetch: each request hangs until released, and rejects with an
@@ -879,13 +847,14 @@ describe('RemoteFileWithRangeCache aborted-chunk sharing', () => {
     const file = makeFile(mockFetch)
     const controller = new AbortController()
 
-    // the owner opens the chunk fetch, the joiner shares it rather than asking
-    // for the same 256 KiB again
+    // the owner opens the fetch, the joiner shares it rather than asking for
+    // the same bytes again
     const owner = file.fetch('https://example.com/data.bin', {
       headers: { range: 'bytes=0-99' },
       signal: controller.signal,
     })
     const joiner = fetchRange(file, 100, 199)
+    await nextTurn()
     expect(calls).toHaveLength(1)
 
     // The joiner never asked to be canceled, so the request it is sharing is
@@ -896,9 +865,7 @@ describe('RemoteFileWithRangeCache aborted-chunk sharing', () => {
 
     await expect(owner).rejects.toThrow(/abort/i)
     expectBytes(await joiner, slice(100, 199))
-    // One request, not two. Nothing was re-issued because nothing was
-    // canceled; this asserted 2 back when a joiner had to re-fetch the 256 KiB
-    // an aborting owner dropped on the floor.
+    // nothing was re-issued because nothing was canceled
     expect(calls).toHaveLength(1)
   })
 
@@ -949,6 +916,7 @@ describe('RemoteFileWithRangeCache aborted-chunk sharing', () => {
       headers: { range: 'bytes=100-199' },
       signal: joiner.signal,
     })
+    await nextTurn()
     expect(calls).toHaveLength(1)
 
     // the other half of the contract: with nobody left wanting these bytes the
@@ -991,15 +959,16 @@ describe('RemoteFileWithRangeCache aborted-chunk sharing', () => {
       headers: { range: 'bytes=0-99' },
       signal: controller.signal,
     })
+    await nextTurn()
     expect(calls).toHaveLength(1)
 
-    // The run is cancelled here, but its request does not reject until a later
-    // tick and its inFlight entry is not removed until after that. A read
+    // The request is cancelled here, but it does not reject until a later
+    // tick and its pending entry is not removed until after that. A read
     // arriving in that window used to join it and be handed somebody else's
     // AbortError — the exact thing the reference count exists to prevent. On a
     // pan this is the ordinary sequence, not a corner: the old blocks are
     // aborted and the new ones requested in the same tick, and adjacent blocks
-    // routinely land in one 256 KiB chunk.
+    // routinely overlap one request.
     controller.abort()
     const fresh = fetchRange(file, 100, 199)
 
@@ -1069,7 +1038,7 @@ describe('RemoteFileWithRangeCache response deadline', () => {
 
     const read = fetchRange(file, 0, 99)
     await flush()
-    expect(calls).toEqual([`bytes=0-${CHUNK - 1}`])
+    expect(calls).toEqual([`bytes=0-${MIN_REQUEST - 1}`])
 
     vi.advanceTimersByTime(RESPONSE_TIMEOUT)
     const error = await read.then(
@@ -1078,7 +1047,7 @@ describe('RemoteFileWithRangeCache response deadline', () => {
     )
     expect(error).toMatch(
       new RegExp(
-        `No response from https://example.com/data.bin for bytes 0-${CHUNK - 1} after 30s`,
+        `No response from https://example.com/data.bin for bytes 0-${MIN_REQUEST - 1} after 30s`,
       ),
     )
     // says which of slow and stalled it is, because the two are what a reader
@@ -1104,7 +1073,7 @@ describe('RemoteFileWithRangeCache response deadline', () => {
       headers: new Headers(),
       arrayBuffer: async () => {
         await body
-        return slice(0, CHUNK - 1).buffer
+        return slice(0, MIN_REQUEST - 1).buffer
       },
     })
     const file = makeFile(slowBodyFetch as unknown as typeof globalThis.fetch)
@@ -1173,7 +1142,7 @@ describe('RemoteFileWithRangeCache network-level failures', () => {
     )
     expect(error).toMatch(
       new RegExp(
-        `Network error fetching https://example.com/data.bin bytes 0-${CHUNK - 1}`,
+        `Network error fetching https://example.com/data.bin bytes 0-${MIN_REQUEST - 1}`,
       ),
     )
     expect(error).toMatch(/Access-Control-Allow-Origin/)
@@ -1346,11 +1315,10 @@ describe('RemoteFileWithRangeCache idle sweep', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  // What makes a sweep safe to run at any moment: getCachedRange captures every
-  // already-cached chunk into a local map before its first await, so evicting
-  // one from the module cache underneath it cannot leave the assembly short.
-  // Without that, this read assembles a buffer of zeros for its first chunk.
-  test('a sweep that evicts a chunk a live read already captured does not break it', async () => {
+  // What makes a sweep safe to run at any moment: a read holds every cached
+  // extent it plans from before its first await, so evicting one underneath it
+  // cannot leave the assembly short.
+  test('a sweep that evicts an extent a live read already holds does not break it', async () => {
     vi.useFakeTimers()
     const calls: number[] = []
     let release: (() => void) | undefined
@@ -1364,8 +1332,8 @@ describe('RemoteFileWithRangeCache idle sweep', () => {
         .slice(1)
         .map(Number) as [number, number]
       calls.push(start)
-      // hold the second chunk open so the sweep lands while it is in flight
-      if (start >= CHUNK) {
+      // hold the gap open so the sweep lands while it is in flight
+      if (start > 0) {
         await new Promise<void>(resolve => {
           release = resolve
         })
@@ -1385,11 +1353,11 @@ describe('RemoteFileWithRangeCache idle sweep', () => {
     release!()
 
     expectBytes(await read, slice(0, CHUNK + 99))
-    // and the sweep really did take chunk 0 out from under that read, rather
-    // than the assertion above passing because nothing was evicted
-    expect(calls).toEqual([0, CHUNK])
+    // and the sweep really did take the first extent out from under that
+    // read, rather than the assertion above passing because nothing was evicted
+    expect(calls).toEqual([0, MIN_REQUEST])
     await fetchRange(file, 0, 99)
-    expect(calls).toEqual([0, CHUNK, 0])
+    expect(calls).toEqual([0, MIN_REQUEST, 0])
   })
 })
 

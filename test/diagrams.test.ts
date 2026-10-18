@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { afterEach, expect, test } from 'vitest'
 
 import { buildArchitectureDot } from '../scripts/diagrams/architecture.ts'
-import { buildChunksSvg } from '../scripts/diagrams/chunks.ts'
+import { buildExtentsSvg } from '../scripts/diagrams/extents.ts'
 import { clearCache } from '../src/index.ts'
 
 afterEach(() => {
@@ -24,8 +24,9 @@ test('architecture.dot is what the source says', () => {
   ).toBe(buildArchitectureDot())
 })
 
-test('chunks.svg is what a read actually does', async () => {
-  expect(readFileSync('docs/img/chunks.svg', 'utf8'), stale('chunks.svg')).toBe(
-    await buildChunksSvg(),
-  )
+test('extents.svg is what a read actually does', async () => {
+  expect(
+    readFileSync('docs/img/extents.svg', 'utf8'),
+    stale('extents.svg'),
+  ).toBe(await buildExtentsSvg())
 })

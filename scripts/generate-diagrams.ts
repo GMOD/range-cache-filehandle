@@ -2,11 +2,11 @@ import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 
 import { buildArchitectureDot } from './diagrams/architecture.ts'
-import { buildChunksSvg } from './diagrams/chunks.ts'
+import { buildExtentsSvg } from './diagrams/extents.ts'
 
 const dot = buildArchitectureDot()
 writeFileSync('docs/img/architecture.dot', dot)
-writeFileSync('docs/img/chunks.svg', await buildChunksSvg())
+writeFileSync('docs/img/extents.svg', await buildExtentsSvg())
 
 try {
   execFileSync('dot', [

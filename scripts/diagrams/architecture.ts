@@ -1,13 +1,14 @@
 import { buildCallGraph, reachable } from './callGraph.ts'
 import {
   CACHE_IDLE_TIMEOUT_MS,
-  CHUNK_SIZE,
-  MAX_CACHE_ENTRIES,
+  CACHE_LIMIT,
   MAX_CONCURRENT,
+  MIN_REQUEST,
+  PIECE_SIZE,
 } from '../../src/constants.ts'
 
 const SOURCE_FILES = [
-  'src/chunkCache.ts',
+  'src/extentCache.ts',
   'src/CachedFilehandle.ts',
   'src/RemoteFileWithRangeCache.ts',
 ]
@@ -37,40 +38,49 @@ const NODES: { key: string; kind: keyof typeof KINDS; detail?: string }[] = [
     kind: 'plain',
     detail: 'key = whatever names the bytes',
   },
-  { key: 'chunkCache.ts#getCachedRange', kind: 'plain' },
+  { key: 'extentCache.ts#getCachedRange', kind: 'plain' },
   {
-    key: 'chunkCache.ts#planRead',
+    key: 'extentCache.ts#planNow',
     kind: 'plain',
-    detail: `one pass over a ${CHUNK_SIZE / 1024} KiB grid`,
+    detail: 'no gaps: served at once',
   },
   {
-    key: 'chunkCache.ts#getCached',
+    key: 'extentCache.ts#enqueue',
+    kind: 'plain',
+    detail: 'gaps wait one microtask',
+  },
+  {
+    key: 'extentCache.ts#flush',
+    kind: 'plain',
+    detail: `plans the turn: gaps grow to ${MIN_REQUEST / 1024} KiB\\nand merge within it`,
+  },
+  {
+    key: 'extentCache.ts#coverage',
     kind: 'shared',
-    detail: 'a hit, moved to newest',
+    detail: 'cached extents, requests in flight',
   },
   {
-    key: 'chunkCache.ts#joinChunk',
+    key: 'extentCache.ts#join',
     kind: 'shared',
-    detail: 'another read is fetching it',
+    detail: 'counted by the readers waiting',
   },
   {
-    key: 'chunkCache.ts#fetchRun',
+    key: 'extentCache.ts#dispatch',
     kind: 'shared',
-    detail: 'one request per run of misses',
+    detail: 'one request per cluster of gaps',
   },
   {
-    key: 'chunkCache.ts#limitConcurrency',
+    key: 'extentCache.ts#limitConcurrency',
     kind: 'shared',
     detail: `≤ ${MAX_CONCURRENT} in flight per origin`,
   },
   { key: 'doFetch', kind: 'plain', detail: 'whatever the entry point passed' },
-  { key: 'chunkCache.ts#publishChunk', kind: 'shared' },
   {
-    key: 'chunkCache.ts#putCached',
+    key: 'extentCache.ts#insert',
     kind: 'shared',
-    detail: `${MAX_CACHE_ENTRIES} chunks, LRU, ${CACHE_IDLE_TIMEOUT_MS / 60_000} min idle`,
+    detail: `${CACHE_LIMIT / 2 ** 20} MiB LRU in ≤ ${PIECE_SIZE / 2 ** 20} MiB pieces, ${CACHE_IDLE_TIMEOUT_MS / 60_000} min idle`,
   },
-  { key: 'chunkCache.ts#assembleRange', kind: 'plain' },
+  { key: 'extentCache.ts#assemble', kind: 'plain' },
 ]
 
 const ENTRY_POINTS = new Set([
@@ -87,7 +97,7 @@ function id(key: string) {
 }
 
 function label(key: string, detail: string | undefined) {
-  const name = key.startsWith('chunkCache.ts#')
+  const name = key.startsWith('extentCache.ts#')
     ? shortName(key)
     : key.replace('#', '.')
   return detail === undefined ? name : `${name}\\n${detail}`
@@ -155,11 +165,11 @@ export function buildArchitectureDot() {
       }
     }
   }
-  lines.push(`  ${id('chunkCache.ts#assembleRange')} -> out`)
+  lines.push(`  ${id('extentCache.ts#assemble')} -> out`)
   // layout only: the bytes are cached before they are assembled, and saying so
   // puts assembly under the fetch it waits for rather than beside it
   lines.push(
-    `  ${id('chunkCache.ts#putCached')} -> ${id('chunkCache.ts#assembleRange')} [style=invis]`,
+    `  ${id('extentCache.ts#insert')} -> ${id('extentCache.ts#assemble')} [style=invis]`,
   )
   lines.push(
     '',

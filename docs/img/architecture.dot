@@ -20,16 +20,17 @@ digraph architecture {
     CachedFilehandle_read [label="CachedFilehandle.read\nkey = whatever names the bytes" fillcolor="#f6f8fa" color="#57606a"]
   }
 
-  chunkCache_ts_getCachedRange [label="getCachedRange" fillcolor="#f6f8fa" color="#57606a"]
-  chunkCache_ts_planRead [label="planRead\none pass over a 256 KiB grid" fillcolor="#f6f8fa" color="#57606a"]
-  chunkCache_ts_getCached [label="getCached\na hit, moved to newest" fillcolor="#fff8c5" color="#9a6700"]
-  chunkCache_ts_joinChunk [label="joinChunk\nanother read is fetching it" fillcolor="#fff8c5" color="#9a6700"]
-  chunkCache_ts_fetchRun [label="fetchRun\none request per run of misses" fillcolor="#fff8c5" color="#9a6700"]
-  chunkCache_ts_limitConcurrency [label="limitConcurrency\n≤ 20 in flight per origin" fillcolor="#fff8c5" color="#9a6700"]
+  extentCache_ts_getCachedRange [label="getCachedRange" fillcolor="#f6f8fa" color="#57606a"]
+  extentCache_ts_planNow [label="planNow\nno gaps: served at once" fillcolor="#f6f8fa" color="#57606a"]
+  extentCache_ts_enqueue [label="enqueue\ngaps wait one microtask" fillcolor="#f6f8fa" color="#57606a"]
+  extentCache_ts_flush [label="flush\nplans the turn: gaps grow to 64 KiB\nand merge within it" fillcolor="#f6f8fa" color="#57606a"]
+  extentCache_ts_coverage [label="coverage\ncached extents, requests in flight" fillcolor="#fff8c5" color="#9a6700"]
+  extentCache_ts_join [label="join\ncounted by the readers waiting" fillcolor="#fff8c5" color="#9a6700"]
+  extentCache_ts_dispatch [label="dispatch\none request per cluster of gaps" fillcolor="#fff8c5" color="#9a6700"]
+  extentCache_ts_limitConcurrency [label="limitConcurrency\n≤ 20 in flight per origin" fillcolor="#fff8c5" color="#9a6700"]
   doFetch [label="doFetch\nwhatever the entry point passed" fillcolor="#f6f8fa" color="#57606a"]
-  chunkCache_ts_publishChunk [label="publishChunk" fillcolor="#fff8c5" color="#9a6700"]
-  chunkCache_ts_putCached [label="putCached\n1000 chunks, LRU, 15 min idle" fillcolor="#fff8c5" color="#9a6700"]
-  chunkCache_ts_assembleRange [label="assembleRange" fillcolor="#f6f8fa" color="#57606a"]
+  extentCache_ts_insert [label="insert\n256 MiB LRU in ≤ 1 MiB pieces, 15 min idle" fillcolor="#fff8c5" color="#9a6700"]
+  extentCache_ts_assemble [label="assemble" fillcolor="#f6f8fa" color="#57606a"]
   RemoteFileWithRangeCache_fetchRange [label="RemoteFileWithRangeCache.fetchRange" fillcolor="#dafbe1" color="#1a7f37"]
   inner_read [label="inner.read" fillcolor="#dafbe1" color="#1a7f37"]
 
@@ -37,21 +38,24 @@ digraph architecture {
 
   caller -> RemoteFileWithRangeCache_fetchBytes
   caller -> CachedFilehandle_read
-  RemoteFileWithRangeCache_fetchBytes -> chunkCache_ts_getCachedRange
-  CachedFilehandle_read -> chunkCache_ts_getCachedRange
-  chunkCache_ts_getCachedRange -> chunkCache_ts_planRead
-  chunkCache_ts_getCachedRange -> chunkCache_ts_assembleRange
-  chunkCache_ts_planRead -> chunkCache_ts_getCached
-  chunkCache_ts_planRead -> chunkCache_ts_fetchRun
-  chunkCache_ts_planRead -> chunkCache_ts_joinChunk
-  chunkCache_ts_fetchRun -> chunkCache_ts_limitConcurrency
-  chunkCache_ts_fetchRun -> chunkCache_ts_publishChunk
-  chunkCache_ts_limitConcurrency -> doFetch
+  RemoteFileWithRangeCache_fetchBytes -> extentCache_ts_getCachedRange
+  CachedFilehandle_read -> extentCache_ts_getCachedRange
+  extentCache_ts_getCachedRange -> extentCache_ts_planNow
+  extentCache_ts_getCachedRange -> extentCache_ts_enqueue
+  extentCache_ts_getCachedRange -> extentCache_ts_assemble
+  extentCache_ts_planNow -> extentCache_ts_coverage
+  extentCache_ts_planNow -> extentCache_ts_join
+  extentCache_ts_enqueue -> extentCache_ts_flush
+  extentCache_ts_flush -> extentCache_ts_coverage
+  extentCache_ts_flush -> extentCache_ts_dispatch
+  extentCache_ts_flush -> extentCache_ts_join
+  extentCache_ts_dispatch -> extentCache_ts_limitConcurrency
+  extentCache_ts_dispatch -> extentCache_ts_insert
+  extentCache_ts_limitConcurrency -> doFetch
   doFetch -> inner_read
   doFetch -> RemoteFileWithRangeCache_fetchRange
-  chunkCache_ts_publishChunk -> chunkCache_ts_putCached
-  chunkCache_ts_assembleRange -> out
-  chunkCache_ts_putCached -> chunkCache_ts_assembleRange [style=invis]
+  extentCache_ts_assemble -> out
+  extentCache_ts_insert -> extentCache_ts_assemble [style=invis]
 
   subgraph cluster_legend {
     label="Legend"

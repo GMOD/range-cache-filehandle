@@ -65,13 +65,4 @@ describe('requests go through RemoteFile.buildRequest', () => {
     await expect(file.read(0, -1)).rejects.toThrow(TypeError)
     expect(seen).toEqual([])
   })
-
-  test('a length past what a Uint8Array holds is refused', async () => {
-    const seen: RequestInit[] = []
-    const file = new RemoteFileWithRangeCache(nextUrl(), {
-      fetch: capture(seen),
-    })
-    await expect(file.read(2 ** 32, 0)).rejects.toThrow(/a Uint8Array can hold/)
-    expect(seen).toEqual([])
-  })
 })

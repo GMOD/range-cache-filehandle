@@ -5,7 +5,7 @@ import path from 'node:path'
 import { BlobFile, LocalFile, RemoteFile } from 'generic-filehandle2'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
-import { hasSize } from '../src/chunkCache.ts'
+import { hasSize } from '../src/extentCache.ts'
 import { CachedFilehandle, clearCache, clearCacheFor } from '../src/index.ts'
 
 import type { GenericFilehandle } from 'generic-filehandle2'

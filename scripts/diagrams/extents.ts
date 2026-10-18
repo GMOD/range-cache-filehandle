@@ -1,0 +1,189 @@
+import { RemoteFileWithRangeCache } from '../../src/RemoteFileWithRangeCache.ts'
+import {
+  CACHE_IDLE_TIMEOUT_MS,
+  CACHE_LIMIT,
+  MIN_REQUEST,
+} from '../../src/constants.ts'
+import { clearCache } from '../../src/extentCache.ts'
+
+const URL_KEY = 'https://example.com/reads.bam'
+const KiB = 1024
+const SIZE = 1024 * KiB
+
+interface Range {
+  start: number
+  end: number
+}
+
+const CACHED: Range = { start: 160 * KiB, end: 320 * KiB }
+const IN_FLIGHT: Range = { start: 448 * KiB, end: 576 * KiB }
+const READ: Range = { start: 96 * KiB, end: 704 * KiB }
+const SMALL_READ: Range = { start: 736 * KiB, end: 740 * KiB }
+
+/**
+ * Run the reads the diagram draws, and report the range headers the cache
+ * sent for them. Nothing here decides those — the picture is whatever this
+ * observes.
+ */
+async function observeReads() {
+  clearCache()
+  const requests: Range[] = []
+  let release: (() => void) | undefined
+
+  const fetch = async (_url: string | URL | Request, init?: RequestInit) => {
+    const header = new Headers(init?.headers).get('range')
+    const match = header ? /bytes=(\d+)-(\d+)/.exec(header) : null
+    if (!match) {
+      throw new Error(`the diagram's read sent no range header: ${header}`)
+    }
+    const start = Number(match[1])
+    const end = Math.min(Number(match[2]), SIZE - 1)
+    requests.push({ start, end: end + 1 })
+    if (start === IN_FLIGHT.start) {
+      await new Promise<void>(resolve => {
+        release = resolve
+      })
+    }
+    return new Response(new Uint8Array(end - start + 1), {
+      status: 206,
+      headers: { 'content-range': `bytes ${start}-${end}/${SIZE}` },
+    })
+  }
+
+  const file = new RemoteFileWithRangeCache(URL_KEY, { fetch })
+  const read = (range: Range) => file.read(range.end - range.start, range.start)
+  await read(CACHED)
+  const other = read(IN_FLIGHT)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  if (release === undefined) {
+    throw new Error('the other read was meant to still be in flight')
+  }
+
+  const before = requests.length
+  const reads = [read(READ), read(SMALL_READ)]
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const sent = requests.slice(before)
+  release()
+  await Promise.all([...reads, other])
+  return sent
+}
+
+/** the parts of `range` that neither the cached extent nor the request in flight covers */
+function gapsOf(range: Range) {
+  const gaps: Range[] = []
+  let cursor = range.start
+  for (const cover of [CACHED, IN_FLIGHT]) {
+    if (cover.end <= cursor || cover.start >= range.end) {
+      continue
+    }
+    if (cover.start > cursor) {
+      gaps.push({ start: cursor, end: cover.start })
+    }
+    cursor = Math.max(cursor, cover.end)
+  }
+  if (cursor < range.end) {
+    gaps.push({ start: cursor, end: range.end })
+  }
+  return gaps
+}
+
+const MARGIN = 40
+const AXIS_START = 64 * KiB
+const AXIS_END = 832 * KiB
+const PX_PER_BYTE = 1 / KiB
+const HEIGHT = 340
+
+function bytes(n: number) {
+  return n.toLocaleString('en-US')
+}
+
+function kib(n: number) {
+  return `${Math.round(n / KiB)} KiB`
+}
+
+export async function buildExtentsSvg() {
+  const requests = await observeReads()
+  const gaps = gapsOf(READ)
+  const grown = { start: SMALL_READ.start, end: SMALL_READ.start + MIN_REQUEST }
+  const width = MARGIN * 2 + (AXIS_END - AXIS_START) * PX_PER_BYTE
+  const at = (position: number) =>
+    Math.round((MARGIN + (position - AXIS_START) * PX_PER_BYTE) * 10) / 10
+  const parts: string[] = []
+  const add = (...lines: string[]) => parts.push(...lines)
+  const readBox = (range: Range, y: number, label: string) => {
+    const left = at(range.start)
+    const right = at(range.end)
+    add(
+      `  <rect x="${left}" y="${y}" width="${right - left}" height="20" rx="4" fill="#ddf4ff" stroke="#0969da"/>`,
+      `  <text x="${(left + right) / 2}" y="${y + 14}" font-size="10" fill="#0969da" text-anchor="middle">${label}</text>`,
+    )
+  }
+  const span = (
+    range: Range,
+    fill: string,
+    stroke: string,
+    label: string,
+    dashed = false,
+  ) => {
+    const left = at(range.start)
+    const right = at(range.end)
+    add(
+      `  <rect x="${left}" y="112" width="${right - left}" height="44" fill="${fill}" stroke="${stroke}"${dashed ? ' stroke-dasharray="4 3"' : ''}/>`,
+      `  <text x="${(left + right) / 2}" y="132" font-size="10" fill="#24292f" text-anchor="middle">${kib(range.end - range.start)}</text>`,
+      `  <text x="${(left + right) / 2}" y="146" font-size="9" fill="${stroke}" text-anchor="middle">${label}</text>`,
+    )
+  }
+
+  add(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${HEIGHT}" viewBox="0 0 ${width} ${HEIGHT}"`,
+    '     font-family="Helvetica, Arial, sans-serif" role="img"',
+    `     aria-label="Two reads in one turn: one is partly cached and partly in flight, and their ${gaps.length + 1} gaps become ${requests.length} range requests">`,
+    '  <!-- Generated by scripts/diagrams/extents.ts — do not edit. Every request',
+    '       here was observed by running the real cache. Regenerate: pnpm diagrams -->',
+    `  <rect width="${width}" height="${HEIGHT}" fill="white"/>`,
+    '  <defs>',
+    '    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">',
+    '      <path d="M 0 0 L 10 5 L 0 10 z" fill="#57606a"/>',
+    '    </marker>',
+    '  </defs>',
+    `  <text x="${MARGIN}" y="30" font-size="13" fill="#24292f">Two reads issued in one turn</text>`,
+    `  <text x="${MARGIN}" y="49" font-size="10.5" fill="#57606a">One extent is cached and another read has one in flight, so only the ${gaps.length + 1} gaps are fetched. Gaps within ${kib(MIN_REQUEST)} of each other share a request: ${requests.length} go out.</text>`,
+  )
+  readBox(READ, 72, `read(${bytes(READ.end - READ.start)} bytes)`)
+  readBox(SMALL_READ, 72, '')
+  add(
+    `  <text x="${at(SMALL_READ.end) + 4}" y="86" font-size="10" fill="#0969da">read(${bytes(SMALL_READ.end - SMALL_READ.start)})</text>`,
+  )
+  span(CACHED, '#fff8c5', '#9a6700', 'cached')
+  span(IN_FLIGHT, '#fff8c5', '#9a6700', 'in flight', true)
+  for (const gap of gaps) {
+    span(gap, '#f6f8fa', '#57606a', 'gap')
+  }
+  span(grown, '#f6f8fa', '#57606a', 'gap, grown')
+
+  for (const request of requests) {
+    const left = at(request.start)
+    const right = at(request.end)
+    const middle = (left + right) / 2
+    const boxWidth = Math.max(right - left, 176)
+    const boxX = Math.min(
+      Math.max(middle - boxWidth / 2, 10),
+      width - 10 - boxWidth,
+    )
+    add(
+      `  <path d="M ${left + 2} 168 v 8 h ${right - left - 4} v -8" fill="none" stroke="#57606a"/>`,
+      `  <line x1="${middle}" y1="176" x2="${middle}" y2="196" stroke="#57606a" marker-end="url(#arrow)"/>`,
+      `  <rect x="${boxX}" y="202" width="${boxWidth}" height="26" rx="4" fill="#dafbe1" stroke="#1a7f37"/>`,
+      `  <text x="${boxX + boxWidth / 2}" y="219" font-size="10" fill="#24292f" text-anchor="middle">Range: bytes=${request.start}-${request.end - 1}</text>`,
+    )
+  }
+
+  add(
+    `  <text x="${MARGIN}" y="262" font-size="10.5" fill="#57606a">The small read's gap grows to ${kib(MIN_REQUEST)} and lands within ${kib(MIN_REQUEST)} of the large read's last gap, so the two share one request.</text>`,
+    `  <text x="${MARGIN}" y="282" font-size="10.5" fill="#57606a">Everything fetched stays cached, in pieces of at most 1 MiB, until ${CACHE_LIMIT / (KiB * KiB)} MiB of newer bytes push it out</text>`,
+    `  <text x="${MARGIN}" y="298" font-size="10.5" fill="#57606a">or ${CACHE_IDLE_TIMEOUT_MS / 60_000} minutes pass with nothing touching it.</text>`,
+    '</svg>',
+    '',
+  )
+  return parts.join('\n')
+}
