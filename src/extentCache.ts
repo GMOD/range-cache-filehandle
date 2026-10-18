@@ -312,6 +312,19 @@ export function cachedBytes() {
   return held
 }
 
+/** what the cache holds and has in flight for one file; for tests */
+export function inspectFile(key: string) {
+  const file = files.get(key)
+  return {
+    extents: (file?.extents ?? []).map(({ start, end, bytes }) => ({
+      start,
+      end,
+      bytes,
+    })),
+    pending: file?.pending.length ?? 0,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // idle sweep
 // ---------------------------------------------------------------------------
