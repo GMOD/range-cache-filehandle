@@ -1,3 +1,14 @@
+## [2.0.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.6.0...v2.0.0) (2026-10-18)
+
+### Other Changes
+
+- Store fetched byte extents instead of a 256 KiB chunk grid ([46eb560](https://github.com/GMOD/range-cache-filehandle/commit/46eb5606e9e0b80a436a015c8177eae807ce534a))
+- Move the tests and diagrams onto extents ([e3cb559](https://github.com/GMOD/range-cache-filehandle/commit/e3cb5592fea5f718ba8186462787150db29d0913))
+- Fuzz random concurrent reads against the extent cache ([6be3164](https://github.com/GMOD/range-cache-filehandle/commit/6be31647485fc8bb2595a2b462f708f7502c6a19))
+- Describe the extent cache in the README and docs ([1509965](https://github.com/GMOD/range-cache-filehandle/commit/150996539971bf80a7be79df9b3fab16b472fc9f))
+- Fix what two reviews of the extent cache found ([d76ddf7](https://github.com/GMOD/range-cache-filehandle/commit/d76ddf795496c78e09af8d771a6727fdeb5c99b1))
+- Fuzz aborts in the same tick and the same turn as the read ([748343a](https://github.com/GMOD/range-cache-filehandle/commit/748343ac7da4354e9fa23bba4b25602dc3adaa76))
+
 ## [1.6.0](https://github.com/GMOD/range-cache-filehandle/compare/v1.5.2...v1.6.0) (2026-10-17)
 
 ### Other Changes
