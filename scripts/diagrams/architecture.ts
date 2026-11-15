@@ -1,4 +1,3 @@
-import { buildCallGraph, reachable } from './callGraph.ts'
 import {
   CACHE_IDLE_TIMEOUT_MS,
   CACHE_LIMIT,
@@ -6,6 +5,7 @@ import {
   MIN_REQUEST,
   PIECE_SIZE,
 } from '../../src/constants.ts'
+import { buildCallGraph, reachable } from './callGraph.ts'
 
 const SOURCE_FILES = [
   'src/extentCache.ts',

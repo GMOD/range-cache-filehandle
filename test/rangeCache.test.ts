@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
-import { expectBytes } from './expectBytes.ts'
 import {
   CACHE_LIMIT,
   MIN_REQUEST,
@@ -9,6 +8,7 @@ import {
   clearCache,
   setCacheLimit,
 } from '../src/index.ts'
+import { expectBytes } from './expectBytes.ts'
 
 const CHUNK = 256 * 1024
 // mirrors CACHE_IDLE_TIMEOUT_MS and its interval; advancing by timeout +

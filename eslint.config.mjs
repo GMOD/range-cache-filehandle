@@ -6,10 +6,8 @@ import tseslint from 'typescript-eslint'
 export default defineConfig(
   {
     ignores: [
-      'webpack.config.js',
       'dist/*',
       'esm/*',
-      'example/*',
       // `vitest --coverage` writes its own JS reporter assets here. Gitignored,
       // but eslint does not read .gitignore, and no tsconfig includes them
       'coverage/**',

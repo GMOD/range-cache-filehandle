@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from 'vitest'
 
-import { expectBytes } from './expectBytes.ts'
 import {
   CachedFilehandle,
   MIN_REQUEST,
   RemoteFileWithRangeCache,
   clearCache,
 } from '../src/index.ts'
+import { expectBytes } from './expectBytes.ts'
 
 import type { GenericFilehandle } from 'generic-filehandle2'
 
